@@ -1,0 +1,16 @@
+# Build output and dependencies
+dist/
+node_modules/
+client/dist/
+
+# Runtime data (audit log JSONL, local state)
+data/
+
+# Local environment
+.env
+.env.local
+
+# Gate files never ship
+ASSESSMENT.md
+REVIEW.md
+JUDGE.md
