@@ -142,7 +142,9 @@ test("B4: Oxford-comma PR lists are not linked issues", () => {
 
 test("B7: punctuation between the PR keyword and the first #N is not a linked issue", () => {
   // Every phrasing from the round-4 judge probe (r4-colon.mts): the
-  // lead takes the same general separator class as the continuation.
+  // lead takes punctuation/whitespace between the keyword and the
+  // first #N (B8 later narrowed it further: punctuation + a small
+  // allowlist, not the continuation's general word class).
   const cases: [string, number[]][] = [
     ["PRs: #1, #2, #3", []],
     ["PR: #1, #2", []],
@@ -214,5 +216,68 @@ test("B7: punctuated PR leads are not linked issues (fuzz)", () => {
       [9],
       `PRs${punct} #1, #2 and fixes #9`,
     );
+  }
+});
+
+test("B8/B9: allowlisted lead words and hotfix/bugfix/fixup are PR references, not linked issues", () => {
+  // B8: a word from the narrow allowlist between the keyword and the
+  // first #N is part of the PR reference. Every phrasing from the
+  // round-5 judge probe (r5-b7.mts) plus the full allowlist.
+  const b8Cases: [string, number[]][] = [
+    ["PRs list: #1", []],
+    ["PRs below #1", []],
+    ["PRs are #1 and #2", []],
+    ["Related PRs are #1 and #2", []],
+    ["PRs here: #1", []],
+    ["PRs are #1", []],
+    ["PRs is #1", []],
+    ["PRs were #1, #2", []],
+    ["PRs above #1", []],
+    ["PRs following: #1, #2", []],
+    // Controls: words that introduce an issue reference must NOT be
+    // eaten — "PR for #9" is a PR *for* issue #9, not a PR reference.
+    ["PR for #9", [9]],
+    ["PRs for #9", [9]],
+    ["PRs addressing #9", [9]],
+    ["PRs should fix #9", [9]],
+    ["PRs closed #9", [9]],
+    ["PRs fixing #9", [9]],
+    // Status quo, no regression: the lead fails at "for", so nothing
+    // is stripped; [9] is preserved and [1,2] remain false positives
+    // exactly as before this fix.
+    ["The PRs for #9 are #1 and #2", [1, 2, 9]],
+    ["PR #1, fixing #9", [9]],
+    ["PRs #1, #2, closing #9", [9]],
+    ["PRs #1, #2, resolving #9", [9]],
+    // The `pr` prefix of a longer word is not a PR keyword.
+    ["private #9", [9]],
+    ["problem #9", [9]],
+    ["process #9", [9]],
+    ["prefix #9", [9]],
+  ];
+  for (const [body, want] of b8Cases) {
+    assert.deepEqual(linkedIssuesFromBody(body), want, body);
+  }
+  // B9: hotfix/bugfix/fixup ARE pull requests, not issues.
+  const b9Cases: [string, number[]][] = [
+    ["hotfix #9", []],
+    ["bugfix #9", []],
+    ["fixup #9", []],
+    ["See hotfix #9", []],
+    ["backport of hotfix #9", []],
+    ["hotfix: #9", []],
+    ["bugfix #9, #10", []],
+    ["hotfixes #9", []],
+    ["bugfixes #9", []],
+    // Controls: the PR-kind word followed by an issue-introducing
+    // word is a reference TO the issue, not a PR reference.
+    ["hotfix for #9", [9]],
+    ["bugfix for #9", [9]],
+    ["fixup for #9", [9]],
+    ["fixes #9", [9]],
+    ["hotfixing #9", [9]],
+  ];
+  for (const [body, want] of b9Cases) {
+    assert.deepEqual(linkedIssuesFromBody(body), want, body);
   }
 });

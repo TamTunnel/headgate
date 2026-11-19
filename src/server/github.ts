@@ -103,19 +103,31 @@ export function diffHash(files: GhFile[]): string {
  *  reference and must survive: "PRs #1, #2 and fixes #9" keeps #9.
  *  Implemented as a loop, not a regex alternation: strip the lead,
  *  then repeatedly strip a leading separator + #N until none matches.
- *  The lead takes the same general separator class as the
- *  continuation (B7): punctuation/whitespace between the keyword and
- *  the first #N ("Related PRs: #1, #2"), never a word — so "PRs
- *  fixes #9" still yields [9]. The keyword also accepts the
- *  hyphenated form ("pull-request #1"). */
+ *  The lead takes a NARROWER class than the continuation by design
+ *  (B8): punctuation/whitespace between the keyword and the first #N
+ *  ("Related PRs: #1, #2"), plus one allowlisted word from a small
+ *  set of copular/descriptive words that cannot introduce an issue
+ *  reference (are/is/was/were/list/below/above/here/following —
+ *  "PRs are #1 and #2"). It is NOT "the same general separator
+ *  class as the continuation": the continuation eats any non-keyword
+ *  word, and a blanket word-lead was verified to regress real issues
+ *  ("PR for #9" → [] — "for" introduces an issue reference, so
+ *  for/addressing/about/regarding/concerning stay OUT of the
+ *  allowlist). The keyword also accepts the hyphenated form
+ *  ("pull-request #1") and the PR-kind words hotfix/bugfix/fixup
+ *  (B9: "hotfix #9" is a pull request, not an issue), with a
+ *  trailing \b so the `pr` prefix of "prefix"/"private" is not
+ *  eaten. */
 function stripPrReferences(body: string): string {
-  const lead = /\b(?:PRs?|pull[ -]?requests?)[^\w#]*#\d+/gi;
+  const lead =
+    /\b(?:PRs?|pull[ -]?requests?|hotfix(?:es)?|bugfix(?:es)?|fixup)\b(?:[^\w#]+|(?:are|is|was|were|list|below|above|here|following)\b)*#\d+/gi;
   // One continuation step: a separator run followed by #N. A separator
   // token is punctuation/whitespace ([^\w#]) or a word that is not a
-  // keyword — the negative lookahead keeps fixes/closes/resolves from
-  // being swallowed as separators, so the list stops there.
+  // keyword — the negative lookahead keeps fixes/closes/resolves (and
+  // the -ing forms closing/fixing/resolving, B8) from being swallowed
+  // as separators, so the list stops there.
   const continuation =
-    /^(?:[^\w#]|(?!(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b)[A-Za-z]+)+#\d+/i;
+    /^(?:[^\w#]|(?!(?:close[sd]?|closing|fix(?:e[sd])?|fixing|resolve[sd]?|resolving)\b)[A-Za-z]+)+#\d+/i;
   let out = "";
   let cursor = 0;
   let m: RegExpExecArray | null;
