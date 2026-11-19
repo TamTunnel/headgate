@@ -5,6 +5,8 @@
 
 **PR triage for agent fleets.**
 
+**Live demo:** https://tamtunnel.github.io/headgate/ — a real digest from a seeded run, with an explainer video.
+
 ## The problem, in layman's terms
 
 Your coding agents now open more pull requests in a week than your team can read in a month. One tester went from 50 PRs a week to 1,900. Each PR still arrives alone, in the same queue, demanding the same human attention — and a quarter of them conflict with each other, a third of them get accepted (down from 84% for human PRs), and the rest wait five times longer than a human's PR to even get picked up. The team does not have a review problem. It has a queue problem: it cannot tell which of the 1,900 PRs matter, which six are the same change filed six times, and which one touches the payment code.
