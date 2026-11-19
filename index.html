@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Headgate — PR triage for agent fleets</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 820px; margin: 0 auto; padding: 2rem 1.25rem; line-height: 1.6; color: #1a1a1a; }
+  h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+  h2 { margin-top: 2rem; }
+  h3 { margin-top: 0; }
+  .tagline { font-size: 1.15rem; color: #444; }
+  video { width: 100%; border: 1px solid #ccc; border-radius: 8px; }
+  code { background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 4px; }
+  pre { background: #f4f4f4; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: .85em; }
+  pre code { background: none; padding: 0; }
+  details pre { max-height: 480px; overflow: auto; }
+  .note { background: #fff8e1; border-left: 4px solid #e6a200; padding: 0.75rem 1rem; margin: 1rem 0; }
+  .limits { background: #f7f7f7; border-left: 4px solid #888; padding: 0.75rem 1rem; margin: 1rem 0; }
+  .step { background: #f8f9fa; border-left: 4px solid #2a7ae2; padding: 1rem 1.2rem; margin: 1.2rem 0; border-radius: 0 6px 6px 0; }
+  ol li, ul li { margin-bottom: 0.35rem; }
+  a { color: #0b5fff; }
+  .small { color: #555; font-size: .9em; }
+  table { border-collapse: collapse; width: 100%; font-size: .9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; }
+</style>
+</head>
+<body>
+<h1>Headgate</h1>
+<p class="tagline">PR triage for agent fleets. Your coding agents now open more pull requests in a week than your team can read in a month — Headgate groups the flood, scores each PR from plain checkable facts, and hands you one digest a day, riskiest first.</p>
+
+<p><a href="https://github.com/TamTunnel/headgate">Repository on GitHub</a> · Apache-2.0 · TypeScript / Node 24+ · Fastify + React + Postgres</p>
+
+<h2 id="video">Demo video</h2>
+<p>A real run of the Headgate service — the actual server, seeded test PRs, a real digest build:</p>
+<video controls preload="metadata" src="headgate-explainer.mp4">
+  Your browser does not support the video tag. <a href="headgate-explainer.mp4">Download the video</a>.
+</video>
+<div class="note"><strong>About this demo:</strong> the 10 PRs were seeded locally through the service's dev-only endpoint (<code>/api/dev/seed-pr</code>, fake GitHub client — no real GitHub, no real repos). The ingestion, scoring, clustering, digest, and audit verification are the real service, run end to end on 2026-11-19. The digest below is the verbatim <code>digest/1</code> record that run issued.</div>
+
+<h2>The digest — <code>digest/1</code>, 2026-11-19, <code>acme/demo-fleet</code></h2>
+<p>Digest id (SHA-256 of the canonical content):<br><code>5266415f0adfcd27ac1b7e28c7238fd85cc8d851526455e5410053402069ac5f</code></p>
+<p>10 open PRs · 6 clusters · 2 low, 4 medium, 0 high, 0 critical · 0 excluded.</p>
+<div class="step"><h3>1. Add login flow (and 3 more) — max 49 (medium)</h3><ul><li><strong>#7 Add login flow</strong> — 17 (low), CI green, devin-bot<br><span class="small">author +13: bot-authored baseline; author&#x27;s first PR in this repo; size +4: 150 lines changed across 2 files</span></li><li><strong>#8 Add login flow (retry)</strong> — 39 (medium), CI green, devin-bot<br><span class="small">duplicate +20: near-identical diff to open PR #7; overlap +10: shares files with 1 other open PR(s); shares a linked issue with another open PR; author +5: bot-authored baseline</span></li><li><strong>#9 Add login flow, take 3</strong> — 24 (low), CI green, devin-bot<br><span class="small">overlap +15: shares files with 2 other open PR(s); shares a linked issue with another open PR; author +5: bot-authored baseline; size +4: 125 lines changed across 2 files</span></li><li><strong>#14 Add login flow (duplicate)</strong> — 49 (medium), CI green, devin-bot<br><span class="small">duplicate +20: near-identical diff to open PR #7; overlap +20: shares files with 3 other open PR(s); shares a linked issue with another open PR; author +5: bot-authored baseline</span></li></ul><p class="small">Why grouped (18 edge reasons): PR #7 and PR #8 share files (Jaccard 1.00); PR #7 and PR #8 both link issue #42; PR #7 and PR #8 share head-branch lineage (devin/7-login / devin/8-login); PR #7 and PR #8 have near-identical diffs; …</p></div>
+<div class="step"><h3>2. Refactor payment webhook (and 1 more) — max 37 (medium)</h3><ul><li><strong>#10 Refactor payment webhook</strong> — 37 (medium), CI red, cursor-bot<br><span class="small">author +13: bot-authored baseline; author&#x27;s first PR in this repo; tests +10: CI failing; size +9: 705 lines changed across 3 files</span></li><li><strong>#11 Fix payment webhook retry</strong> — 26 (medium), CI green, cursor-bot<br><span class="small">overlap +10: shares files with 1 other open PR(s); shares a linked issue with another open PR; size +6: 305 lines changed across 2 files; author +5: bot-authored baseline</span></li></ul><p class="small">Why grouped (3 edge reasons): PR #10 and PR #11 share files (Jaccard 0.67); PR #10 and PR #11 both link issue #57; PR #10 and PR #11 share head-branch lineage (cursor/10-payments / cursor/11-payments)</p></div>
+<div class="step"><h3>3. Add dark mode toggle — max 29 (medium)</h3><ul><li><strong>#16 Add dark mode toggle</strong> — 29 (medium), CI green, sweep-bot<br><span class="small">author +13: bot-authored baseline; author&#x27;s first PR in this repo; staleness +10: 13 day(s) without human touch; size +6: 290 lines changed across 1 files</span></li></ul><p class="small">Singleton — no edges to other open PRs.</p></div>
+<div class="step"><h3>4. Migrate users table — max 27 (medium)</h3><ul><li><strong>#13 Migrate users table</strong> — 27 (medium), CI none, copilot-bot<br><span class="small">author +13: bot-authored baseline; author&#x27;s first PR in this repo; tests +8: no CI configured; size +6: 300 lines changed across 1 files</span></li></ul><p class="small">Singleton — no edges to other open PRs.</p></div>
+<div class="step"><h3>5. Bump lodash to 4.17.21 — max 21 (low)</h3><ul><li><strong>#15 Bump lodash to 4.17.21</strong> — 21 (low), CI green, dependabot[bot]<br><span class="small">author +13: bot-authored baseline; author&#x27;s first PR in this repo; static +5: dependency (package.json: 1 new dependency entry); size +3: 90 lines changed across 2 files</span></li></ul><p class="small">Singleton — no edges to other open PRs.</p></div>
+<div class="step"><h3>6. Update README with setup notes — max 9 (low)</h3><ul><li><strong>#12 Update README with setup notes</strong> — 9 (low), CI green, pete<br><span class="small">author +8: author&#x27;s first PR in this repo; size +1: 32 lines changed across 1 files</span></li></ul><p class="small">Singleton — no edges to other open PRs.</p></div>
+<h2>Full signal breakdowns (from the live queue, same run)</h2>
+<p>Every signal lists its points; the signals always sum exactly to the total. The digest above shows each member's top three reasons; here is the complete breakdown:</p>
+<table><tr><th>PR</th><th>Title</th><th>Score</th><th>Signals (name +points)</th></tr><tr><td>#14</td><td>Add login flow (duplicate)</td><td>49 (medium)</td><td>size +4, author +5, overlap +20, duplicate +20</td></tr><tr><td>#8</td><td>Add login flow (retry)</td><td>39 (medium)</td><td>size +4, author +5, overlap +10, duplicate +20</td></tr><tr><td>#10</td><td>Refactor payment webhook</td><td>37 (medium)</td><td>size +9, tests +10, author +13, static +5</td></tr><tr><td>#16</td><td>Add dark mode toggle</td><td>29 (medium)</td><td>size +6, author +13, staleness +10</td></tr><tr><td>#13</td><td>Migrate users table</td><td>27 (medium)</td><td>size +6, tests +8, author +13</td></tr><tr><td>#11</td><td>Fix payment webhook retry</td><td>26 (medium)</td><td>size +6, author +5, overlap +10, static +5</td></tr><tr><td>#9</td><td>Add login flow, take 3</td><td>24 (low)</td><td>size +4, author +5, overlap +15</td></tr><tr><td>#15</td><td>Bump lodash to 4.17.21</td><td>21 (low)</td><td>size +3, author +13, static +5</td></tr><tr><td>#7</td><td>Add login flow</td><td>17 (low)</td><td>size +4, author +13</td></tr><tr><td>#12</td><td>Update README with setup notes</td><td>9 (low)</td><td>size +1, author +8</td></tr></table>
+<p class="small">Notable: PR #14 scores 49 while its near-identical twin #7 scores 17 — scores are computed when a PR is ingested, so the first copy of a duplicated change scores before the overlap exists and the later copies see it (+20 duplicate, +20 overlap). PR #10's full score includes a static +5 for a new <code>child_process</code>/<code>exec</code> call; PR #11's includes a static +5 for a new network call. The blast signal contributed 0 everywhere in this run — no sensitive paths are configured for this demo repo, and the service scores blast radius from the repo's configured list (empty by default).</p>
+
+<h2>What makes it different</h2>
+<ul>
+  <li><strong>The digest is the product.</strong> One ordered list a day, stored as a versioned <code>digest/1</code> artifact with a SHA-256 id. A human works it in an hour.</li>
+  <li><strong>Deterministic, explainable risk scores.</strong> Every point lists its reason — size, blast radius, tests, author fleet, overlap, churn, staleness, duplication, static patterns. No LLM anywhere in scoring, reviewing, or summarizing.</li>
+  <li><strong>Clustering with reasons.</strong> Related PRs become one cluster — same files, same ticket, same branch lineage, near-identical diff — and the digest shows <em>why</em> they were grouped, so a human can split them.</li>
+  <li><strong>Human decisions are recorded.</strong> Reviewed, snooze, assign, escalate, split, merge — every queue action goes into a hash-chained audit log, anchored so tail truncation fails verification.</li>
+  <li><strong>It never writes to GitHub.</strong> No approvals, no merges, no comments, no labels. Read-only app permissions by design.</li>
+</ul>
+
+<h2>Honest limits — stated, not hidden</h2>
+<div class="limits">
+<ul>
+  <li><strong>This demo used seeded test data.</strong> No real GitHub, no real PRs — the fleet here is ten hand-written PRs fed through the dev endpoint. The pipeline they went through is the real one.</li>
+  <li><strong>A risk score is a heuristic, not a verdict.</strong> A 10-line diff can delete a database; a 5,000-line diff can be generated tests. The score orders attention; it never certifies safety.</li>
+  <li><strong>Clustering can mis-group.</strong> Two PRs touching the same files may be unrelated; two PRs on the same ticket may touch disjoint files. The digest shows its edge reasons so a human can see why — and split them.</li>
+  <li><strong>Scores are computed at ingestion.</strong> The first copy of a duplicated change scores lower than the later copies, which see the overlap. The digest orders by the stored scores.</li>
+  <li><strong>The digest is stale by construction.</strong> A PR opened after the daily digest waits until tomorrow — or until someone opens the live queue in the web UI.</li>
+  <li><strong>GitHub-only in v1.</strong> The ingestion layer is behind an interface, so a second forge is a new adapter, not a rewrite.</li>
+  <li><strong>Audit log is tamper-evident, not tamper-proof.</strong> A coordinated rewrite of the chain and its head anchor is still undetectable without an off-box checkpoint.</li>
+</ul>
+</div>
+
+<h2>Full digest JSON (verbatim)</h2>
+<details>
+<summary>digest/1 record as issued</summary>
+<pre><code>{
+  &quot;digest_id&quot;: &quot;5266415f0adfcd27ac1b7e28c7238fd85cc8d851526455e5410053402069ac5f&quot;,
+  &quot;state&quot;: &quot;issued&quot;,
+  &quot;content&quot;: {
+    &quot;date&quot;: &quot;2026-11-19&quot;,
+    &quot;repo&quot;: &quot;acme/demo-fleet&quot;,
+    &quot;stats&quot;: {
+      &quot;low&quot;: 2,
+      &quot;high&quot;: 0,
+      &quot;medium&quot;: 4,
+      &quot;clusters&quot;: 6,
+      &quot;critical&quot;: 0,
+      &quot;open_prs&quot;: 10
+    },
+    &quot;format&quot;: &quot;digest/1&quot;,
+    &quot;clusters&quot;: [
+      {
+        &quot;summary&quot;: &quot;Add login flow (and 3 more)&quot;,
+        &quot;max_band&quot;: &quot;medium&quot;,
+        &quot;max_risk&quot;: 49,
+        &quot;cluster_id&quot;: &quot;6eefc62d7993ee7a&quot;,
+        &quot;member_prs&quot;: [
+          {
+            &quot;ci&quot;: &quot;green&quot;,
+            &quot;url&quot;: &quot;https://github.com/acme/demo-fleet/pull/7&quot;,
+            &quot;band&quot;: &quot;low&quot;,
+            &quot;score&quot;: 17,
+            &quot;stale&quot;: false,
+            &quot;title&quot;: &quot;Add login flow&quot;,
+            &quot;author&quot;: &quot;devin-bot&quot;,
+            &quot;number&quot;: 7,
+            &quot;snapshot_at&quot;: &quot;2026-11-19T03:16:45.891Z&quot;,
+            &quot;top_reasons&quot;: [
+              &quot;author +13: bot-authored baseline; author&#x27;s first PR in this repo&quot;,
+              &quot;size +4: 150 lines changed across 2 files&quot;
+            ]
+          },
+          {
+            &quot;ci&quot;: &quot;green&quot;,
+            &quot;url&quot;: &quot;https://github.com/acme/demo-fleet/pull/8&quot;,
+            &quot;band&quot;: &quot;medium&quot;,
+            &quot;score&quot;: 39,
+            &quot;stale&quot;: false,
+            &quot;title&quot;: &quot;Add login flow (retry)&quot;,
+            &quot;author&quot;: &quot;devin-bot&quot;,
+            &quot;number&quot;: 8,
+            &quot;snapshot_at&quot;: &quot;2026-11-19T03:16:45.914Z&quot;,
+            &quot;top_reasons&quot;: [
+              &quot;duplicate +20: near-identical diff to open PR #7&quot;,
+              &quot;overlap +10: shares files with 1 other open PR(s); shares a linked issue with another open PR&quot;,
+              &quot;author +5: bot-authored baseline&quot;
+            ]
+          },
+          {
+            &quot;ci&quot;: &quot;green&quot;,
+            &quot;url&quot;: &quot;https://github.com/acme/demo-fleet/pull/9&quot;,
+            &quot;band&quot;: &quot;low&quot;,
+            &quot;score&quot;: 24,
+            &quot;stale&quot;: false,
+            &quot;title&quot;: &quot;Add login flow, take 3&quot;,
+            &quot;author&quot;: &quot;devin-bot&quot;,
+            &quot;number&quot;: 9,
+            &quot;snapshot_at&quot;: &quot;2026-11-19T03:16:45.931Z&quot;,
+            &quot;top_reasons&quot;: [
+              &quot;overlap +15: shares files with 2 other open PR(s); shares a linked issue with another open PR&quot;,
+              &quot;author +5: bot-authored baseline&quot;,
+              &quot;size +4: 125 lines changed across 2 files&quot;
+            ]
+          },
+          {
+            &quot;ci&quot;: &quot;green&quot;,
+            &quot;url&quot;: &quot;https://github.com/acme/demo-fleet/pull/14&quot;,
+            &quot;band&quot;: &quot;medium&quot;,
+            &quot;score&quot;: 49,
+            &quot;stale&quot;: false,
+            &quot;title&quot;: &quot;Add login flow (duplicate)&quot;,
+            &quot;author&quot;: &quot;devin-bot&quot;,
+            &quot;number&quot;: 14,
+            &quot;snapshot_at&quot;: &quot;2026-11-19T03:16:46.034Z&quot;,
+            &quot;top_reasons&quot;: [
+              &quot;duplicate +20: near-identical diff to open PR #7&quot;,
+              &quot;overlap +20: shares files with 3 other open PR(s); shares a linked issue with another open PR&quot;,
+              &quot;author +5: bot-authored baseline&quot;
+            ]
+          }
+        ],
+        &quot;edge_reasons&quot;: [
+          &quot;PR #7 and PR #8 share files (Jaccard 1.00)&quot;,
+          &quot;PR #7 and PR #8 both link issue #42&quot;,
+          &quot;PR #7 and PR #8 share head-branch lineage (devin/7-login / devin/8-login)&quot;,
+          &quot;PR #7 and PR #8 have near-identical diffs&quot;,
+          &quot;PR #7 and PR #9 both link issue #42&quot;,
+          &quot;PR #7 and PR #9 share head-branch lineage (devin/7-login / devin/9-login)&quot;,
+          &quot;PR #7 and PR #14 share files (Jaccard 1.00)&quot;,
+          &quot;PR #7 and PR #14 both link issue #42&quot;,
+          &quot;PR #7 and PR #14 share head-branch lineage (devin/7-login / devin/14-login)&quot;,
+          &quot;PR #7 and PR #14 have near-identical diffs&quot;,
+          &quot;PR #8 and PR #9 both link issue #42&quot;,
+          &quot;PR #8 and PR #9 share head-branch lineage (devin/8-login / devin/9-login)&quot;,
+          &quot;PR #8 and PR #14 share files (Jaccard 1.00)&quot;,
+          &quot;PR #8 and PR #14 both link issue #42&quot;,
+          &quot;PR #8 and PR #14 share head-branch lineage (devin/8-login / devin/14-login)&quot;,
+          &quot;PR #8 and PR #14 have near-identical diffs&quot;,
+          &quot;PR #9 and PR #14 both link issue #42&quot;,
+          &quot;PR #9 and PR #14 share head-branch lineage (devin/9-login / devin/14-login)&quot;
+        ],
+        &quot;member_count&quot;: 4,
+        &quot;oldest_first_pr&quot;: 7
+      },
+      {
+        &quot;summary&quot;: &quot;Refactor payment webhook (and 1 more)&quot;,
+        &quot;max_band&quot;: &quot;medium&quot;,
+        &quot;max_risk&quot;: 37,
+        &quot;cluster_id&quot;: &quot;43a2d66e5f850f64&quot;,
+        &quot;member_prs&quot;: [
+          {
+            &quot;ci&quot;: &quot;red&quot;,
+            &quot;url&quot;: &quot;https://github.com/acme/demo-fleet/pull/10&quot;,
+            &quot;band&quot;: &quot;medium&quot;,
+            &quot;score&quot;: 37,
+            &quot;stale&quot;: false,
+            &quot;title&quot;: &quot;Refactor payment webhook&quot;,
+            &quot;author&quot;: &quot;cursor-bot&quot;,
+            &quot;number&quot;: 10,
+            &quot;snapshot_at&quot;: &quot;2026-11-19T03:16:45.951Z&quot;,
+            &quot;top_reasons&quot;: [
+              &quot;author +13: bot-authored baseline; author&#x27;s first PR in this repo&quot;,
+              &quot;tests +10: CI failing&quot;,
+              &quot;size +9: 705 lines changed across 3 files&quot;
+            ]
+          },
+          {
+            &quot;ci&quot;: &quot;green&quot;,
+            &quot;url&quot;: &quot;https://github.com/acme/demo-fleet/pull/11&quot;,
+            &quot;band&quot;: &quot;medium&quot;,
+            &quot;score&quot;: 26,
+            &quot;stale&quot;: false,
+            &quot;title&quot;: &quot;Fix payment webhook retry&quot;,
+            &quot;author&quot;: &quot;cursor-bot&quot;,
+            &quot;number&quot;: 11,
+            &quot;snapshot_at&quot;: &quot;2026-11-19T03:16:45.976Z&quot;,
+            &quot;top_reasons&quot;: [
+              &quot;overlap +10: shares files with 1 other open PR(s); shares a linked issue with another open PR&quot;,
+              &quot;size +6: 305 lines changed across 2 files&quot;,
+              &quot;author +5: bot-authored baseline&quot;
+            ]
+          }
+        ],
+        &quot;edge_reasons&quot;: [
+          &quot;PR #10 and PR #11 share files (Jaccard 0.67)&quot;,
+          &quot;PR #10 and PR #11 both link issue #57&quot;,
+          &quot;PR #10 and PR #11 share head-branch lineage (cursor/10-payments / cursor/11-payments)&quot;
+        ],
+        &quot;member_count&quot;: 2,
+        &quot;oldest_first_pr&quot;: 10
+      },
+      {
+        &quot;summary&quot;: &quot;Add dark mode toggle&quot;,
+        &quot;max_band&quot;: &quot;medium&quot;,
+        &quot;max_risk&quot;: 29,
+        &quot;cluster_id&quot;: &quot;f0d0e023f9b1a4da&quot;,
+        &quot;member_prs&quot;: [
+          {
+            &quot;ci&quot;: &quot;green&quot;,
+            &quot;url&quot;: &quot;https://github.com/acme/demo-fleet/pull/16&quot;,
+            &quot;band&quot;: &quot;medium&quot;,
+            &quot;score&quot;: 29,
+            &quot;stale&quot;: false,
+            &quot;title&quot;: &quot;Add dark mode toggle&quot;,
+            &quot;author&quot;: &quot;sweep-bot&quot;,
+            &quot;number&quot;: 16,
+            &quot;snapshot_at&quot;: &quot;2026-11-19T03:16:47.881Z&quot;,
+            &quot;top_reasons&quot;: [
+              &quot;author +13: bot-authored baseline; author&#x27;s first PR in this repo&quot;,
+              &quot;staleness +10: 13 day(s) without human touch&quot;,
+              &quot;size +6: 290 lines changed across 1 files&quot;
+            ]
+          }
+        ],
+        &quot;edge_reasons&quot;: [],
+        &quot;member_count&quot;: 1,
+        &quot;oldest_first_pr&quot;: 16
+      },
+      {
+        &quot;summary&quot;: &quot;Migrate users table&quot;,
+        &quot;max_band&quot;: &quot;medium&quot;,
+        &quot;max_risk&quot;: 27,
+        &quot;cluster_id&quot;: &quot;525ec3b5ad9afc0f&quot;,
+        &quot;member_prs&quot;: [
+          {
+            &quot;ci&quot;: &quot;none&quot;,
+            &quot;url&quot;: &quot;https://github.com/acme/demo-fleet/pull/13&quot;,
+            &quot;band&quot;: &quot;medium&quot;,
+            &quot;score&quot;: 27,
+            &quot;stale&quot;: false,
+            &quot;title&quot;: &quot;Migrate users table&quot;,
+            &quot;author&quot;: &quot;copilot-bot&quot;,
+            &quot;number&quot;: 13,
+            &quot;snapshot_at&quot;: &quot;2026-11-19T03:16:46.011Z&quot;,
+            &quot;top_reasons&quot;: [
+              &quot;author +13: bot-authored baseline; author&#x27;s first PR in this repo&quot;,
+              &quot;tests +8: no CI configured&quot;,
+              &quot;size +6: 300 lines changed across 1 files&quot;
+            ]
+          }
+        ],
+        &quot;edge_reasons&quot;: [],
+        &quot;member_count&quot;: 1,
+        &quot;oldest_first_pr&quot;: 13
+      },
+      {
+        &quot;summary&quot;: &quot;Bump lodash to 4.17.21&quot;,
+        &quot;max_band&quot;: &quot;low&quot;,
+        &quot;max_risk&quot;: 21,
+        &quot;cluster_id&quot;: &quot;3bcf2afdb32ea342&quot;,
+        &quot;member_prs&quot;: [
+          {
+            &quot;ci&quot;: &quot;green&quot;,
+            &quot;url&quot;: &quot;https://github.com/acme/demo-fleet/pull/15&quot;,
+            &quot;band&quot;: &quot;low&quot;,
+            &quot;score&quot;: 21,
+            &quot;stale&quot;: false,
+            &quot;title&quot;: &quot;Bump lodash to 4.17.21&quot;,
+            &quot;author&quot;: &quot;dependabot[bot]&quot;,
+            &quot;number&quot;: 15,
+            &quot;snapshot_at&quot;: &quot;2026-11-19T03:16:46.049Z&quot;,
+            &quot;top_reasons&quot;: [
+              &quot;author +13: bot-authored baseline; author&#x27;s first PR in this repo&quot;,
+              &quot;static +5: dependency (package.json: 1 new dependency entry)&quot;,
+              &quot;size +3: 90 lines changed across 2 files&quot;
+            ]
+          }
+        ],
+        &quot;edge_reasons&quot;: [],
+        &quot;member_count&quot;: 1,
+        &quot;oldest_first_pr&quot;: 15
+      },
+      {
+        &quot;summary&quot;: &quot;Update README with setup notes&quot;,
+        &quot;max_band&quot;: &quot;low&quot;,
+        &quot;max_risk&quot;: 9,
+        &quot;cluster_id&quot;: &quot;568f15e9fe7bcf0a&quot;,
+        &quot;member_prs&quot;: [
+          {
+            &quot;ci&quot;: &quot;green&quot;,
+            &quot;url&quot;: &quot;https://github.com/acme/demo-fleet/pull/12&quot;,
+            &quot;band&quot;: &quot;low&quot;,
+            &quot;score&quot;: 9,
+            &quot;stale&quot;: false,
+            &quot;title&quot;: &quot;Update README with setup notes&quot;,
+            &quot;author&quot;: &quot;pete&quot;,
+            &quot;number&quot;: 12,
+            &quot;snapshot_at&quot;: &quot;2026-11-19T03:16:45.991Z&quot;,
+            &quot;top_reasons&quot;: [
+              &quot;author +8: author&#x27;s first PR in this repo&quot;,
+              &quot;size +1: 32 lines changed across 1 files&quot;
+            ]
+          }
+        ],
+        &quot;edge_reasons&quot;: [],
+        &quot;member_count&quot;: 1,
+        &quot;oldest_first_pr&quot;: 12
+      }
+    ],
+    &quot;excluded&quot;: []
+  }
+}</code></pre>
+</details>
+
+<h2>Run it yourself</h2>
+<pre><code>git clone https://github.com/TamTunnel/headgate.git
+cd headgate
+npm ci
+# Needs Postgres 16+; see README for the database setup.
+# Local development without GitHub:
+GITHUB_CLIENT=fake npm start
+# Seed a PR, then deliver a signed webhook (see scripts/smoke.mjs),
+# or just run the smoke script:
+npm run smoke</code></pre>
+
+<p class="small">Source: <a href="https://github.com/TamTunnel/headgate">github.com/TamTunnel/headgate</a> · Apache-2.0 · Sample digest generated with the Headgate service, November 2026.</p>
+</body>
+</html>
