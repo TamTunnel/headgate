@@ -102,9 +102,14 @@ export function diffHash(files: GhFile[]): string {
  *  reference (fixes/closes/resolves + #N), which is a real issue
  *  reference and must survive: "PRs #1, #2 and fixes #9" keeps #9.
  *  Implemented as a loop, not a regex alternation: strip the lead,
- *  then repeatedly strip a leading separator + #N until none matches. */
+ *  then repeatedly strip a leading separator + #N until none matches.
+ *  The lead takes the same general separator class as the
+ *  continuation (B7): punctuation/whitespace between the keyword and
+ *  the first #N ("Related PRs: #1, #2"), never a word — so "PRs
+ *  fixes #9" still yields [9]. The keyword also accepts the
+ *  hyphenated form ("pull-request #1"). */
 function stripPrReferences(body: string): string {
-  const lead = /\b(?:PRs?|pull requests?)\s*#\d+/gi;
+  const lead = /\b(?:PRs?|pull[ -]?requests?)[^\w#]*#\d+/gi;
   // One continuation step: a separator run followed by #N. A separator
   // token is punctuation/whitespace ([^\w#]) or a word that is not a
   // keyword — the negative lookahead keeps fixes/closes/resolves from
