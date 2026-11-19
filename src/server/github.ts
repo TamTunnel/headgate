@@ -92,21 +92,49 @@ export function diffHash(files: GhFile[]): string {
   return createHash("sha256").update(added.join("\n")).digest("hex");
 }
 
+/** Strip PR references (and whole PR lists) from a body before the
+ *  issue extraction runs. A PR list starts at "PR #N" / "PRs #N" /
+ *  "pull request(s) #N" and continues across ANY separator between
+ *  #N items — punctuation, whitespace, or words (B5, N12: the rule
+ *  is "any separator token", not an enumeration — B3 enumerated
+ *  comma/and, B4 added Oxford, B5 found the next dozen; enumerating
+ *  again would only buy a B6). The list ends only at a keyword-led
+ *  reference (fixes/closes/resolves + #N), which is a real issue
+ *  reference and must survive: "PRs #1, #2 and fixes #9" keeps #9.
+ *  Implemented as a loop, not a regex alternation: strip the lead,
+ *  then repeatedly strip a leading separator + #N until none matches. */
+function stripPrReferences(body: string): string {
+  const lead = /\b(?:PRs?|pull requests?)\s*#\d+/gi;
+  // One continuation step: a separator run followed by #N. A separator
+  // token is punctuation/whitespace ([^\w#]) or a word that is not a
+  // keyword — the negative lookahead keeps fixes/closes/resolves from
+  // being swallowed as separators, so the list stops there.
+  const continuation =
+    /^(?:[^\w#]|(?!(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b)[A-Za-z]+)+#\d+/i;
+  let out = "";
+  let cursor = 0;
+  let m: RegExpExecArray | null;
+  while ((m = lead.exec(body)) !== null) {
+    out += body.slice(cursor, m.index);
+    let end = m.index + m[0].length;
+    for (;;) {
+      const step = continuation.exec(body.slice(end));
+      if (step === null) break;
+      end += step[0].length;
+    }
+    cursor = end;
+    lead.lastIndex = end;
+  }
+  out += body.slice(cursor);
+  return out;
+}
+
 /** Extract linked issue numbers from a PR body (`#123`, `fixes #123`).
  *  A bare `#123` preceded by "PR" / "pull request" is a pull-request
  *  reference, not an issue, and is excluded (F11). */
 export function linkedIssuesFromBody(body: string): number[] {
   const out = new Set<number>();
-  // Strip PR references first: "See PR #123", "pull request #7" — and
-  // the plural/list forms (B3): "PRs #123 and #124", "Depends on PRs
-  // #123, #124", "pull requests #7 and #8". A bare #N that follows a
-  // PR reference in the same comma/and list is part of that reference,
-  // not a linked issue, so the whole list span is stripped at once.
-  // B4: the Oxford form has TWO separators (", and"), so the comma
-  // continuation accepts an optional "and" after the comma.
-  const withoutPrRefs = body
-    .replace(/\bPRs?\s*#\d+(?:\s*,(?:\s*and)?\s*#\d+|\s+and\s+#\d+)*/gi, "")
-    .replace(/\bpull requests?\s*#\d+(?:\s*,(?:\s*and)?\s*#\d+|\s+and\s+#\d+)*/gi, "");
+  const withoutPrRefs = stripPrReferences(body);
   const re = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|#)\s*#?(\d+)/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(withoutPrRefs)) !== null) {

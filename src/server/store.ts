@@ -752,6 +752,13 @@ export async function appendAudit(
        VALUES ($1,$2,$3,$4,$5,$6)`,
       [entry.seq, entry.ts, entry.kind, JSON.stringify(entry.payload), entry.prev_hash, entry.hash],
     );
+    // B6: anchor the head in the SAME transaction as the append, so
+    // the append and the anchor can never diverge.
+    await client.query(
+      `INSERT INTO audit_head (id, seq, entry_hash) VALUES (1, $1, $2)
+       ON CONFLICT (id) DO UPDATE SET seq = EXCLUDED.seq, entry_hash = EXCLUDED.entry_hash`,
+      [entry.seq, entry.hash],
+    );
     await client.query("COMMIT");
     if (auditLogPath) {
       // F12: the mirror write must never hang a request. Node's
@@ -808,7 +815,32 @@ export async function listAuditEntries(
 
 export async function verifyAudit(pool: Pool): Promise<{ ok: boolean; reason?: string }> {
   const entries = await listAuditEntries(pool, 100000);
-  return verifyAuditChain(entries);
+  const chain = verifyAuditChain(entries);
+  if (!chain.ok) return chain;
+  // B6 head anchor: the chain's last entry must match the singleton
+  // anchor row, so deleting the head (or the last N) entries fails
+  // verification as "truncated". N13: compare against the true max
+  // seq (a direct ORDER BY ... LIMIT 1), not the fetched window —
+  // the anchor check must not depend on the 100k cap.
+  const headRes = await pool.query(
+    `SELECT seq, entry_hash FROM audit_log ORDER BY seq DESC LIMIT 1`,
+  );
+  const anchorRes = await pool.query(
+    `SELECT seq, entry_hash FROM audit_head WHERE id = 1`,
+  );
+  const head = headRes.rows[0] as { seq: string; entry_hash: string } | undefined;
+  const anchor = anchorRes.rows[0] as { seq: string; entry_hash: string } | undefined;
+  if (head === undefined && anchor === undefined) return { ok: true };
+  if (head === undefined || anchor === undefined) {
+    return { ok: false, reason: "truncated: audit head anchor does not match the chain" };
+  }
+  if (Number(head.seq) !== Number(anchor.seq) || head.entry_hash !== anchor.entry_hash) {
+    return {
+      ok: false,
+      reason: `truncated: audit head anchor seq ${anchor.seq} does not match chain head seq ${head.seq}`,
+    };
+  }
+  return { ok: true };
 }
 
 /** Recompute the hash of a stored entry (used by the S-7 probe). */

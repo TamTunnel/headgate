@@ -90,6 +90,67 @@ test("audit append assigns strictly increasing seqs from 1", async () => {
   }
 });
 
+test("B6: deleting the head (or the last two) audit entries fails verification", async () => {
+  const t = await makeTestApp();
+  try {
+    const { pool, config } = { pool: t.tdb.pool, config: t.config };
+    for (let i = 1; i <= 5; i++) {
+      await store.appendAudit(pool, config.auditLogPath, "test", { i });
+    }
+    assert.deepEqual(await store.verifyAudit(pool), { ok: true });
+    const entries = await store.listAuditEntries(pool);
+    const head = entries[entries.length - 1];
+    // Delete the head: the chain stays internally consistent, so only
+    // the head anchor can catch it.
+    await pool.query(`DELETE FROM audit_log WHERE seq = $1`, [head.seq]);
+    const afterHeadDelete = await store.verifyAudit(pool);
+    assert.equal(afterHeadDelete.ok, false);
+    assert.match(afterHeadDelete.reason ?? "", /truncated/);
+    // Restore the exact row: the chain verifies again.
+    await pool.query(
+      `INSERT INTO audit_log (seq, ts, kind, payload, prev_hash, entry_hash) VALUES ($1,$2,$3,$4,$5,$6)`,
+      [head.seq, head.ts, head.kind, JSON.stringify(head.payload), head.prev_hash, head.hash],
+    );
+    assert.deepEqual(await store.verifyAudit(pool), { ok: true });
+    // Delete the last two: the same truncation class, also caught.
+    const tail = (await store.listAuditEntries(pool)).slice(-2);
+    await pool.query(`DELETE FROM audit_log WHERE seq = ANY($1::bigint[])`, [
+      tail.map((e) => e.seq),
+    ]);
+    const afterTail2 = await store.verifyAudit(pool);
+    assert.equal(afterTail2.ok, false);
+    assert.match(afterTail2.reason ?? "", /truncated/);
+    // Restore both: verifies again.
+    for (const e of tail) {
+      await pool.query(
+        `INSERT INTO audit_log (seq, ts, kind, payload, prev_hash, entry_hash) VALUES ($1,$2,$3,$4,$5,$6)`,
+        [e.seq, e.ts, e.kind, JSON.stringify(e.payload), e.prev_hash, e.hash],
+      );
+    }
+    assert.deepEqual(await store.verifyAudit(pool), { ok: true });
+    // Controls (same behavior as before): payload tamper and middle
+    // deletion are still caught by the chain check itself.
+    const mid = (await store.listAuditEntries(pool))[2];
+    await pool.query(`UPDATE audit_log SET payload = '{"tampered":true}'::jsonb WHERE seq = $1`, [
+      mid.seq,
+    ]);
+    const afterTamper = await store.verifyAudit(pool);
+    assert.equal(afterTamper.ok, false);
+    assert.match(afterTamper.reason ?? "", /hash mismatch/);
+    await pool.query(`UPDATE audit_log SET payload = $1 WHERE seq = $2`, [
+      JSON.stringify(mid.payload),
+      mid.seq,
+    ]);
+    assert.deepEqual(await store.verifyAudit(pool), { ok: true });
+    await pool.query(`DELETE FROM audit_log WHERE seq = $1`, [mid.seq]);
+    const afterMidDelete = await store.verifyAudit(pool);
+    assert.equal(afterMidDelete.ok, false);
+    assert.match(afterMidDelete.reason ?? "", /seq gap/);
+  } finally {
+    await t.close();
+  }
+});
+
 test("F12: an audit append with a hanging mirror path returns instead of hanging", async () => {
   const t = await makeTestApp();
   try {

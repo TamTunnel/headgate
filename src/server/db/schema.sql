@@ -179,6 +179,25 @@ CREATE TABLE IF NOT EXISTS audit_log (
   entry_hash TEXT NOT NULL
 );
 
+-- Head anchor for the audit chain (B6): the latest seq + entry hash,
+-- updated in the same transaction as each append. verifyAudit compares
+-- the chain's head against it, so deleting the head (or the last N)
+-- entries fails verification as "truncated". Without an off-box
+-- checkpoint a coordinated rewrite of chain + anchor is still
+-- undetectable — the README says so.
+CREATE TABLE IF NOT EXISTS audit_head (
+  id INT PRIMARY KEY CHECK (id = 1),
+  seq BIGINT NOT NULL,
+  entry_hash TEXT NOT NULL
+);
+-- Backfill for stores created before the anchor existed: seed it from
+-- the current chain head. Appends upsert the row afterwards, so a
+-- concurrent append cannot leave a stale anchor (the upsert wins, or
+-- the row already exists and this is a no-op).
+INSERT INTO audit_head (id, seq, entry_hash)
+  SELECT 1, seq, entry_hash FROM audit_log ORDER BY seq DESC LIMIT 1
+  ON CONFLICT (id) DO NOTHING;
+
 -- Webhook delivery dedup: one row per GitHub delivery id. A replayed
 -- delivery inserts nothing and is not re-processed (S-1, S-9, A-3).
 CREATE TABLE IF NOT EXISTS deliveries (

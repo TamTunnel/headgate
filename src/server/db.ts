@@ -21,7 +21,7 @@ export async function migrate(pool: Pool): Promise<void> {
 /** Test helper: wipe all data but keep the schema. */
 export async function truncateAll(pool: Pool): Promise<void> {
   await pool.query(
-    `TRUNCATE jobs, deliveries, decisions, audit_log, digests, clusters,
+    `TRUNCATE jobs, deliveries, decisions, audit_log, audit_head, digests, clusters,
      cluster_corrections, risk_scores, pr_checks, pr_files, pull_requests,
      repos, tenants RESTART IDENTITY CASCADE`,
   );
