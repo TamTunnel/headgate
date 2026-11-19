@@ -102,9 +102,11 @@ export function linkedIssuesFromBody(body: string): number[] {
   // #123, #124", "pull requests #7 and #8". A bare #N that follows a
   // PR reference in the same comma/and list is part of that reference,
   // not a linked issue, so the whole list span is stripped at once.
+  // B4: the Oxford form has TWO separators (", and"), so the comma
+  // continuation accepts an optional "and" after the comma.
   const withoutPrRefs = body
-    .replace(/\bPRs?\s*#\d+(?:\s*(?:,|and)\s*#\d+)*/gi, "")
-    .replace(/\bpull requests?\s*#\d+(?:\s*(?:,|and)\s*#\d+)*/gi, "");
+    .replace(/\bPRs?\s*#\d+(?:\s*,(?:\s*and)?\s*#\d+|\s+and\s+#\d+)*/gi, "")
+    .replace(/\bpull requests?\s*#\d+(?:\s*,(?:\s*and)?\s*#\d+|\s+and\s+#\d+)*/gi, "");
   const re = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|#)\s*#?(\d+)/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(withoutPrRefs)) !== null) {

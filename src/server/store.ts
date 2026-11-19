@@ -514,6 +514,11 @@ async function reclusterRepoTx(
       [tenantId, repoId, c.members],
     );
     const ids = (members.rows as { id: string }[]).map((r) => r.id);
+    // N10: a split group naming only PRs that are not stored (e.g. a
+    // pre-fix ghost-member correction [[7],[99]]) resolves to zero
+    // ids — do not insert an empty cluster row for it, or the live
+    // queue renders a phantom cluster with no members.
+    if (ids.length === 0) continue;
     await client.query(
       `INSERT INTO clusters (tenant_id, repo_id, cluster_key, member_pr_ids, edge_reasons, human_override)
        VALUES ($1,$2,$3,$4,$5,$6)

@@ -43,3 +43,17 @@ test("F11: PR references are not linked issues", () => {
   // A PR reference followed by a real issue still yields the issue.
   assert.deepEqual(linkedIssuesFromBody("See PR #123, fixes #42"), [42]);
 });
+
+test("B4: Oxford-comma PR lists are not linked issues", () => {
+  // The Oxford form has two separators (", and"); the whole list is
+  // one PR reference, not a linked issue.
+  assert.deepEqual(linkedIssuesFromBody("PRs #1, #2, and #3"), []);
+  assert.deepEqual(linkedIssuesFromBody("pull requests #7, #8, and #9"), []);
+  assert.deepEqual(linkedIssuesFromBody("PR #1, #2, and #3"), []);
+  assert.deepEqual(linkedIssuesFromBody("PRs #1 and #2, and #3"), []);
+  // Non-Oxford forms and the real-issue cases still hold (P12a/P12c).
+  assert.deepEqual(linkedIssuesFromBody("PRs #1, #2 and #3"), []);
+  assert.deepEqual(linkedIssuesFromBody("Fixes #42 and closes #7"), [7, 42]);
+  assert.deepEqual(linkedIssuesFromBody("Version 2.0, see #99"), [99]);
+  assert.deepEqual(linkedIssuesFromBody("PRs #1, #2 and fixes #9"), [9]);
+});

@@ -167,11 +167,21 @@ async function main() {
       check(replay.status === 200 && replayBody.deduped === true, `replay of PR #${n} deduped`);
     }
 
-    // Wait for the worker to ingest both PRs (snapshot + score + cluster).
+    // Wait for the worker to ingest both PRs (snapshot + score +
+    // cluster). N11: poll until cluster membership settles, not just
+    // scores — the cluster job runs after scoring, so reading the
+    // queue as soon as both PRs are scored can catch PR 8 scored but
+    // not yet clustered in.
     let queue = null;
     for (let i = 0; i < 80; i++) {
       const q = await req(`/api/queue?installation_id=${INSTALLATION}&repo=${encodeURIComponent(REPO)}`);
-      if (q.status === 200 && q.body.prs?.length === 2 && q.body.prs.every((p) => p.score !== null)) {
+      if (
+        q.status === 200 &&
+        q.body.prs?.length === 2 &&
+        q.body.prs.every((p) => p.score !== null) &&
+        q.body.clusters?.length === 1 &&
+        q.body.clusters[0].members.length === 2
+      ) {
         queue = q.body;
         break;
       }

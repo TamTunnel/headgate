@@ -389,3 +389,51 @@ test("B2: an overlapping split correction cannot poison the repo", async () => {
     await t.close();
   }
 });
+
+test("N10: a pre-fix ghost-member correction leaves no empty cluster in the queue", async () => {
+  const t = await makeTestApp();
+  try {
+    const INSTALLATION = 111;
+    const REPO = "acme/app";
+    for (const n of [7, 8, 9]) {
+      t.github.addPr(INSTALLATION, REPO, fakePr({ number: n }), [fakeFile("src/shared.ts"), fakeFile(`src/f${n}.ts`)], [fakeCheck("ci")]);
+      await postWebhook(t.app, { deliveryId: `n10-${n}`, payload: prPayload(INSTALLATION, REPO, n) });
+    }
+    await t.worker.drain();
+    const tenant = await store.getTenantByInstallation(t.tdb.pool, INSTALLATION);
+    assert.ok(tenant);
+    const repo = await store.getRepo(t.tdb.pool, tenant.id, REPO);
+    assert.ok(repo);
+    const clusters = await store.listClusters(t.tdb.pool, tenant.id, repo.id);
+    assert.equal(clusters.length, 1);
+    const key = clusters[0].cluster_key;
+    // Pre-fix style correction, written raw to bypass the API's
+    // partition validation: group [99] names a PR that is not a
+    // cluster member and resolves to zero stored PR ids.
+    await t.tdb.pool.query(
+      `INSERT INTO cluster_corrections (tenant_id, repo_id, cluster_key, correction, actor, reason)
+       VALUES ($1,$2,$3,$4,'pre-fix','ghost member')`,
+      [tenant.id, repo.id, key, JSON.stringify({ split: { groups: [[7], [99]] } })],
+    );
+    // Ingest an unrelated PR: the recluster must not emit an empty
+    // cluster row for the ghost group, and no PR may drop out.
+    t.github.addPr(INSTALLATION, REPO, fakePr({ number: 11 }), [fakeFile("docs/other.md")], [fakeCheck("ci")]);
+    const w = await postWebhook(t.app, { deliveryId: "n10-11", payload: prPayload(INSTALLATION, REPO, 11) });
+    assert.equal(w.status, 202);
+    await t.worker.drain();
+    const empty = await t.tdb.pool.query(
+      `SELECT COUNT(*)::int AS n FROM clusters WHERE tenant_id = $1 AND repo_id = $2 AND member_pr_ids = '{}'`,
+      [tenant.id, repo.id],
+    );
+    assert.equal(empty.rows[0].n, 0, "no empty cluster rows");
+    const after = await store.listClusters(t.tdb.pool, tenant.id, repo.id);
+    const queued = new Set<number>();
+    for (const c of after) {
+      const rows = await t.tdb.pool.query(`SELECT number FROM pull_requests WHERE id = ANY($1::uuid[])`, [c.member_pr_ids]);
+      for (const r of rows.rows as { number: number }[]) queued.add(r.number);
+    }
+    assert.deepEqual([...queued].sort((a, b) => a - b), [7, 8, 9, 11]);
+  } finally {
+    await t.close();
+  }
+});
