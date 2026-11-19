@@ -18,10 +18,17 @@ CREATE TABLE IF NOT EXISTS repos (
   -- The sensitive-path list is the only per-repo score config in v1.
   -- Score weights are fixed (see src/server/scorer.ts).
   sensitive_paths TEXT[] NOT NULL DEFAULT '{}',
+  -- Agent branch prefixes that imply related work for clustering (F4).
+  -- NULL or empty means the built-in default allowlist
+  -- (see src/server/cluster.ts DEFAULT_AGENT_BRANCH_PREFIXES).
+  agent_branch_prefixes TEXT[],
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, full_name)
 );
+-- Idempotent on boot: existing databases gain the column (migrate()
+-- re-runs this file on every boot).
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS agent_branch_prefixes TEXT[];
 CREATE INDEX IF NOT EXISTS repos_tenant_idx ON repos (tenant_id);
 
 CREATE TABLE IF NOT EXISTS pull_requests (

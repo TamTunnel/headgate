@@ -73,7 +73,10 @@ export interface GitHubClient {
 }
 
 /** Diff hash: SHA-256 over the sorted set of normalized added lines.
- *  Two PRs with the same added-line set are near-identical diffs. */
+ *  Two PRs with the same added-line set are near-identical diffs.
+ *  An empty added-line set (binary-only diffs, pure deletions) hashes
+ *  to "" — no edge (F5): every empty diff would otherwise share one
+ *  hash and cluster. */
 export function diffHash(files: GhFile[]): string {
   const added: string[] = [];
   for (const f of files) {
@@ -84,16 +87,24 @@ export function diffHash(files: GhFile[]): string {
       }
     }
   }
+  if (added.length === 0) return "";
   added.sort();
   return createHash("sha256").update(added.join("\n")).digest("hex");
 }
 
-/** Extract linked issue numbers from a PR body (`#123`, `fixes #123`). */
+/** Extract linked issue numbers from a PR body (`#123`, `fixes #123`).
+ *  A bare `#123` preceded by "PR" / "pull request" is a pull-request
+ *  reference, not an issue, and is excluded (F11). */
 export function linkedIssuesFromBody(body: string): number[] {
   const out = new Set<number>();
+  // Strip PR references first: "See PR #123", "pull request #7".
+  const withoutPrRefs = body.replace(
+    /\b(?:PR|pull requests?)\s*#\d+/gi,
+    "",
+  );
   const re = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|#)\s*#?(\d+)/gi;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(body)) !== null) {
+  while ((m = re.exec(withoutPrRefs)) !== null) {
     const n = Number(m[1]);
     if (n > 0) out.add(n);
   }

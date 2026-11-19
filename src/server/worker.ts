@@ -18,7 +18,7 @@
  */
 
 import type { Pool } from "pg";
-import { clusterPrs } from "./cluster";
+import { clusterPrs, DEFAULT_AGENT_BRANCH_PREFIXES } from "./cluster";
 import type { HeadgateConfig } from "./config";
 import type { DigestContent } from "./digest";
 import { buildDigestForRepo, todayDateString } from "./digestBuild";
@@ -156,6 +156,11 @@ export class Worker {
 
   private async recluster(pool: Pool, tenantId: string, repoId: string): Promise<void> {
     const openPrs = await store.listOpenPrs(pool, tenantId, repoId);
+    const repo = await store.getRepoById(pool, repoId);
+    const agentPrefixes =
+      repo?.agent_branch_prefixes?.length
+        ? repo.agent_branch_prefixes
+        : DEFAULT_AGENT_BRANCH_PREFIXES;
     const inputs = [];
     for (const pr of openPrs) {
       const files = await store.getPrFiles(pool, pr.id);
@@ -167,7 +172,7 @@ export class Worker {
         diffHash: pr.diff_hash,
       });
     }
-    await store.reclusterRepo(pool, tenantId, repoId, clusterPrs(inputs));
+    await store.reclusterRepo(pool, tenantId, repoId, clusterPrs(inputs, agentPrefixes));
   }
 
   private async handleDigest(payload: Record<string, unknown>): Promise<void> {

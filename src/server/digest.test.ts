@@ -29,6 +29,7 @@ function digestPr(
   risk: number,
   band: RiskScore["band"],
   createdAt: string,
+  stale = false,
 ): DigestPr {
   return {
     number,
@@ -39,6 +40,8 @@ function digestPr(
     score: score(risk, band),
     createdAt,
     ci: "green",
+    snapshotAt: createdAt,
+    stale,
   };
 }
 
@@ -153,4 +156,29 @@ test("stats count open PRs, clusters, and bands", () => {
   assert.equal(content.stats.critical, 1);
   assert.equal(content.stats.low, 1);
   assert.deepEqual(content.excluded, [{ pr_number: 3, reason: "snoozed" }]);
+});
+
+test("F13: stale snapshots are carried into member_prs (snapshot_at + stale flag)", () => {
+  const { content } = buildDigest(
+    "acme/app",
+    "2026-11-19",
+    [
+      {
+        key: "a",
+        members: [
+          digestPr(1, "Fresh", 10, "low", "2026-11-19T08:00:00Z", false),
+          digestPr(2, "Stale", 10, "low", "2026-11-18T08:00:00Z", true),
+        ],
+        edges: [],
+      },
+    ],
+    [],
+  );
+  const members = content.clusters[0].member_prs;
+  assert.equal(members.find((m) => m.number === 1)?.stale, false);
+  assert.equal(members.find((m) => m.number === 2)?.stale, true);
+  assert.equal(
+    members.find((m) => m.number === 2)?.snapshot_at,
+    "2026-11-18T08:00:00Z",
+  );
 });

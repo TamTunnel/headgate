@@ -6,6 +6,8 @@ export interface HeadgateConfig {
   host: string;
   databaseUrl: string;
   baseUrl: string;
+  /** Operator token guarding every /api/* route except /api/health (F1). */
+  adminToken: string;
   webhookSecret: string;
   githubAppId: string;
   githubAppPrivateKey: string;
@@ -38,12 +40,16 @@ function devOnlySecret(kind: string): string {
 export function loadConfig(): HeadgateConfig {
   return {
     port: Number(env("PORT", "3000")),
-    host: env("HOST", "0.0.0.0"),
+    // Default to localhost: the API is operator-only (F1) and a
+    // non-localhost bind needs a reverse proxy in front.
+    host: env("HOST", "127.0.0.1"),
     databaseUrl: env(
       "DATABASE_URL",
       "postgres://headgate:headgate-dev@127.0.0.1:5432/headgate",
     ),
     baseUrl: env("BASE_URL", "http://localhost:3000"),
+    adminToken:
+      env("ADMIN_TOKEN", "") || devOnlySecret("ADMIN_TOKEN"),
     webhookSecret:
       env("GITHUB_WEBHOOK_SECRET", "") || devOnlySecret("GITHUB_WEBHOOK_SECRET"),
     githubAppId: env("GITHUB_APP_ID", ""),

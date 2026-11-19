@@ -16,13 +16,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as store from "./store.js";
 import { buildDigestForRepo } from "./digestBuild.js";
+import { signPayload } from "./webhook.js";
 import {
   fakeCheck,
   fakeFile,
   fakePr,
+  adminHeaders,
   makeTestApp,
   postWebhook,
   prPayload,
+  TEST_ADMIN_TOKEN,
   TEST_WEBHOOK_SECRET,
   type TestApp,
 } from "./testapp.js";
@@ -197,6 +200,7 @@ test("S-6: a PR title with <script>/SQL/template syntax is stored safely and ren
     const q = await t.app.inject({
       method: "GET",
       url: `/api/queue?installation_id=${INSTALLATION}&repo=${encodeURIComponent(REPO)}`,
+      headers: adminHeaders(),
     });
     assert.equal(q.statusCode, 200);
     const { renderDigestEmail } = await import("./email.js");
@@ -252,7 +256,7 @@ test("D-6: every open agent PR appears in the digest or in the excluded list", a
     const snooze = await t.app.inject({
       method: "POST",
       url: "/api/pr/action",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...adminHeaders() },
       payload: JSON.stringify({
         installation_id: INSTALLATION,
         repo: REPO,
@@ -310,7 +314,7 @@ test("end-to-end: webhook -> snapshot + score + cluster + digest via the API", a
     const build = await t.app.inject({
       method: "POST",
       url: "/api/digest/build",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...adminHeaders() },
       payload: JSON.stringify({ installation_id: INSTALLATION, repo: REPO, date: "2026-11-19" }),
     });
     assert.equal(build.statusCode, 200);
@@ -320,6 +324,7 @@ test("end-to-end: webhook -> snapshot + score + cluster + digest via the API", a
     const get = await t.app.inject({
       method: "GET",
       url: `/api/digest?installation_id=${INSTALLATION}&repo=${encodeURIComponent(REPO)}&date=2026-11-19`,
+      headers: adminHeaders(),
     });
     assert.equal(get.statusCode, 200);
     const digest = JSON.parse(get.body) as {
@@ -334,7 +339,7 @@ test("end-to-end: webhook -> snapshot + score + cluster + digest via the API", a
     const rebuild = await t.app.inject({
       method: "POST",
       url: "/api/digest/build",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...adminHeaders() },
       payload: JSON.stringify({ installation_id: INSTALLATION, repo: REPO, date: "2026-11-19" }),
     });
     const rebuilt = JSON.parse(rebuild.body) as { digest_id: string; created: boolean };
@@ -342,8 +347,141 @@ test("end-to-end: webhook -> snapshot + score + cluster + digest via the API", a
     assert.equal(rebuilt.digest_id, built.digest_id);
 
     // Audit log verifies.
-    const verify = await t.app.inject({ method: "GET", url: "/api/audit/verify" });
+    const verify = await t.app.inject({ method: "GET", url: "/api/audit/verify", headers: adminHeaders() });
     assert.equal(verify.statusCode, 200);
+  } finally {
+    await t.close();
+  }
+});
+
+test("F1: /api/* requires the operator token; /api/health does not", async () => {
+  const t = await makeTestApp();
+  try {
+    await seedPr(t, 1);
+    await postWebhook(t.app, { deliveryId: "f1-1", payload: prPayload(INSTALLATION, REPO, 1) });
+    await t.worker.drain();
+    const json = { "content-type": "application/json" };
+    const cases: { method: "GET" | "POST"; url: string; headers?: Record<string, string>; payload?: string }[] = [
+      { method: "GET", url: "/api/tenants" },
+      { method: "GET", url: `/api/queue?installation_id=${INSTALLATION}&repo=${encodeURIComponent(REPO)}` },
+      { method: "GET", url: "/api/audit/verify" },
+      { method: "GET", url: "/api/jobs" },
+      { method: "GET", url: `/api/audit?installation_id=${INSTALLATION}` },
+      { method: "POST", url: "/api/digest/build", headers: json, payload: JSON.stringify({ installation_id: INSTALLATION, repo: REPO, date: "2026-11-19" }) },
+      { method: "POST", url: "/api/cluster/action", headers: json, payload: JSON.stringify({ installation_id: INSTALLATION, repo: REPO, cluster_key: "x", action: "reviewed" }) },
+      { method: "POST", url: "/api/backfill", headers: json, payload: JSON.stringify({ installation_id: INSTALLATION, repo: REPO }) },
+    ];
+    for (const c of cases) {
+      const res = await t.app.inject({ method: c.method, url: c.url, headers: c.headers, payload: c.payload });
+      assert.equal(res.statusCode, 401, `${c.method} ${c.url} without a token -> ${res.statusCode}`);
+    }
+    // A wrong token is 401 too; the X-Headgate-Admin header works.
+    const wrong = await t.app.inject({ method: "GET", url: "/api/tenants", headers: { authorization: "Bearer nope" } });
+    assert.equal(wrong.statusCode, 401);
+    const viaHeader = await t.app.inject({ method: "GET", url: "/api/tenants", headers: { "x-headgate-admin": TEST_ADMIN_TOKEN } });
+    assert.equal(viaHeader.statusCode, 200);
+    // With the token, a tenant-scoped endpoint answers.
+    const authed = await t.app.inject({
+      method: "GET",
+      url: `/api/queue?installation_id=${INSTALLATION}&repo=${encodeURIComponent(REPO)}`,
+      headers: adminHeaders(),
+    });
+    assert.equal(authed.statusCode, 200);
+    // Health stays public.
+    const health = await t.app.inject({ method: "GET", url: "/api/health" });
+    assert.equal(health.statusCode, 200);
+  } finally {
+    await t.close();
+  }
+});
+
+test("F3: an enqueue failure does not burn the delivery — the redelivery ingests the PR", async () => {
+  const t = await makeTestApp();
+  try {
+    t.github.addPr(
+      INSTALLATION,
+      REPO,
+      fakePr({ number: 9, headBranch: "devin/9-x" }),
+      [fakeFile("src/c.ts")],
+      [fakeCheck("ci")],
+    );
+    await t.tdb.pool.query(`CREATE OR REPLACE FUNCTION hg_fail_jobs() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'simulated enqueue failure'; END; $$ LANGUAGE plpgsql`);
+    await t.tdb.pool.query(`CREATE TRIGGER hg_fail_jobs_trg BEFORE INSERT ON jobs FOR EACH ROW EXECUTE FUNCTION hg_fail_jobs()`);
+    const r1 = await postWebhook(t.app, { deliveryId: "d-crash-f3", payload: prPayload(INSTALLATION, REPO, 9) });
+    assert.equal(r1.status, 500);
+    const deliveries = await t.tdb.pool.query(`SELECT COUNT(*)::int AS n FROM deliveries WHERE delivery_id = 'd-crash-f3'`);
+    assert.equal(deliveries.rows[0].n, 0, "the delivery row rolls back with the failed enqueue");
+    const jobs = await t.tdb.pool.query(`SELECT COUNT(*)::int AS n FROM jobs WHERE idempotency_key = 'webhook:d-crash-f3'`);
+    assert.equal(jobs.rows[0].n, 0);
+    await t.tdb.pool.query(`DROP TRIGGER hg_fail_jobs_trg ON jobs`);
+    await t.tdb.pool.query(`DROP FUNCTION hg_fail_jobs()`);
+    const r2 = await postWebhook(t.app, { deliveryId: "d-crash-f3", payload: prPayload(INSTALLATION, REPO, 9) });
+    assert.equal(r2.status, 202);
+    assert.notEqual(r2.body.deduped, true);
+    await t.worker.drain();
+    const tenant = await store.getTenantByInstallation(t.tdb.pool, INSTALLATION);
+    assert.ok(tenant);
+    const repo = await store.getRepo(t.tdb.pool, tenant.id, REPO);
+    assert.ok(repo);
+    const pr9 = await store.getPrByNumber(t.tdb.pool, tenant.id, repo.id, 9);
+    assert.ok(pr9 !== null, "the redelivery ingested PR #9");
+  } finally {
+    await t.close();
+  }
+});
+
+test("F9: malformed-JSON webhook delivery returns 400 without parser detail", async () => {
+  const t = await makeTestApp();
+  try {
+    const badBody = "{not json";
+    const sig = signPayload(TEST_WEBHOOK_SECRET, Buffer.from(badBody, "utf8"));
+    const res = await t.app.inject({
+      method: "POST",
+      url: "/webhooks/github",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "d-bad-json",
+        "x-github-event": "pull_request",
+        "x-hub-signature-256": sig,
+      },
+      payload: badBody,
+    });
+    assert.equal(res.statusCode, 400);
+    assert.ok(!res.body.includes("Expected property name"), "parser detail leaked into the 400 body");
+    // The delivery id is not burned: a valid redelivery still ingests.
+    await seedPr(t, 8);
+    const r2 = await postWebhook(t.app, { deliveryId: "d-bad-json", payload: prPayload(INSTALLATION, REPO, 8) });
+    assert.equal(r2.status, 202);
+  } finally {
+    await t.close();
+  }
+});
+
+test("F13: the digest marks PRs with snapshots older than 24h as stale", async () => {
+  const t = await makeTestApp();
+  try {
+    await seedPr(t, 30, "Fresh PR");
+    await seedPr(t, 31, "Stale PR");
+    for (const n of [30, 31]) {
+      const res = await postWebhook(t.app, { deliveryId: `f13-${n}`, payload: prPayload(INSTALLATION, REPO, n) });
+      assert.equal(res.status, 202);
+    }
+    await t.worker.drain();
+    // Age PR #31's snapshot by two days.
+    await t.tdb.pool.query(`UPDATE pull_requests SET snapshot_at = now() - interval '2 days' WHERE number = 31`);
+    const tenant = await store.getTenantByInstallation(t.tdb.pool, INSTALLATION);
+    assert.ok(tenant);
+    const repo = await store.getRepo(t.tdb.pool, tenant.id, REPO);
+    assert.ok(repo);
+    await buildDigestForRepo(t.tdb.pool, tenant.id, repo.id, REPO, "2026-11-19");
+    const digest = await store.getDigest(t.tdb.pool, tenant.id, repo.id, "2026-11-19");
+    assert.ok(digest);
+    const members = digest.content.clusters.flatMap((c) => c.member_prs);
+    assert.equal(members.find((m) => m.number === 30)?.stale, false);
+    assert.equal(members.find((m) => m.number === 31)?.stale, true);
+    const { renderDigestEmail } = await import("./email.js");
+    const { text } = renderDigestEmail(digest.content, "http://localhost:3000");
+    assert.ok(text.includes("stale snapshot"));
   } finally {
     await t.close();
   }

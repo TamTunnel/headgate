@@ -144,9 +144,14 @@ export function staticFindings(files: ScorerFile[]): StaticFinding[] {
   const seen = new Set<string>();
   for (const file of files) {
     if (!file.patch) continue;
+    // Strip the leading '+' from each added line before joining (F10):
+    // a call split across lines (`spawn` on one line, `('ls')` on the
+    // next) must still match `spawn\s*\(`, and the '+' between the
+    // lines defeated every multi-line pattern.
     const added = file.patch
       .split("\n")
       .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+      .map((l) => l.slice(1))
       .join("\n");
     for (const { kind, re } of STATIC_PATTERNS) {
       const m = re.exec(added);
@@ -176,14 +181,33 @@ export function staticFindings(files: ScorerFile[]): StaticFinding[] {
 }
 
 export function scorePr(input: ScorerInput): RiskScore {
+  // F6: every numeric input is clamped to >= 0 (non-finite -> 0) before
+  // it can reach a signal. GitHub should never return negative counts,
+  // but the scorer is fed by stored snapshots — one corrupt snapshot
+  // used to persist a NaN score (log10 of a negative) into the DB.
+  const nonNeg = (n: number): number =>
+    Number.isFinite(n) ? Math.max(0, n) : 0;
+  const files = input.files.map((f) => ({
+    ...f,
+    additions: nonNeg(f.additions),
+    deletions: nonNeg(f.deletions),
+  }));
+  const forcePushes = nonNeg(input.forcePushes);
+  const commitsAfterTouch = nonNeg(input.commitsAfterTouch);
+  const daysStale = nonNeg(input.daysStale);
+  const priorReverts = nonNeg(input.author.priorReverts);
+  const overlappingPrs = nonNeg(input.overlap.overlappingPrs);
+
   const signals: ScoreSignal[] = [];
   const add = (name: string, points: number, evidence: string): void => {
-    if (points !== 0) signals.push({ name, points, evidence });
+    // Each computed signal is clamped to >= 0 as well; the `clamp`
+    // signal below is the only one allowed to go negative (D-3).
+    if (points !== 0) signals.push({ name, points: Math.max(0, points), evidence });
   };
 
   // Size: log-scaled lines changed + files touched, capped at 25.
-  const lines = input.files.reduce((n, f) => n + f.additions + f.deletions, 0);
-  const fileCount = input.files.length;
+  const lines = files.reduce((n, f) => n + f.additions + f.deletions, 0);
+  const fileCount = files.length;
   const sizePoints = Math.min(
     25,
     Math.round(10 * Math.log10(1 + lines / 100)) +
@@ -193,7 +217,7 @@ export function scorePr(input: ScorerInput): RiskScore {
 
   // Blast radius: sensitive paths.
   const matched: string[] = [];
-  for (const f of input.files) {
+  for (const f of files) {
     const hit = isSensitivePath(f.path, input.sensitivePaths);
     if (hit && !matched.includes(hit)) matched.push(hit);
   }
@@ -235,20 +259,20 @@ export function scorePr(input: ScorerInput): RiskScore {
     authorPoints += 8;
     authorEvidence.push("author's first PR in this repo");
   }
-  if (input.author.priorReverts > 0) {
-    const p = Math.min(10, input.author.priorReverts * 5);
+  if (priorReverts > 0) {
+    const p = Math.min(10, priorReverts * 5);
     authorPoints += p;
-    authorEvidence.push(`${input.author.priorReverts} prior revert(s) by this author`);
+    authorEvidence.push(`${priorReverts} prior revert(s) by this author`);
   }
   add("author", authorPoints, authorEvidence.join("; ") || "human author, no fleet signals");
 
   // Overlap.
   let overlapPoints = 0;
   const overlapEvidence: string[] = [];
-  if (input.overlap.overlappingPrs > 0) {
-    overlapPoints += Math.min(15, input.overlap.overlappingPrs * 5);
+  if (overlappingPrs > 0) {
+    overlapPoints += Math.min(15, overlappingPrs * 5);
     overlapEvidence.push(
-      `shares files with ${input.overlap.overlappingPrs} other open PR(s)`,
+      `shares files with ${overlappingPrs} other open PR(s)`,
     );
   }
   if (input.overlap.sharesLinkedIssue) {
@@ -260,17 +284,17 @@ export function scorePr(input: ScorerInput): RiskScore {
   // Churn.
   const churnPoints = Math.min(
     10,
-    input.forcePushes * 3 + input.commitsAfterTouch * 2,
+    forcePushes * 3 + commitsAfterTouch * 2,
   );
   add(
     "churn",
     churnPoints,
-    `${input.forcePushes} force-push(es), ${input.commitsAfterTouch} commit(s) after first human touch`,
+    `${forcePushes} force-push(es), ${commitsAfterTouch} commit(s) after first human touch`,
   );
 
   // Staleness, capped at 10.
-  const stalePoints = Math.min(10, Math.max(0, input.daysStale));
-  add("staleness", stalePoints, `${input.daysStale} day(s) without human touch`);
+  const stalePoints = Math.min(10, Math.max(0, daysStale));
+  add("staleness", stalePoints, `${daysStale} day(s) without human touch`);
 
   // Duplication.
   add(
@@ -282,7 +306,7 @@ export function scorePr(input: ScorerInput): RiskScore {
   );
 
   // Static pattern findings.
-  const findings = staticFindings(input.files);
+  const findings = staticFindings(files);
   const staticPoints = Math.min(20, findings.length * 5);
   add(
     "static",
@@ -293,9 +317,13 @@ export function scorePr(input: ScorerInput): RiskScore {
   );
 
   // Total: clamp to 0-100, and keep signals summing exactly to the total
-  // by recording the clamp as its own signal (D-3).
+  // by recording the clamp as its own signal (D-3). A non-finite total
+  // is a bug, not a score: throw rather than store NaN (F6).
   const raw = signals.reduce((n, s) => n + s.points, 0);
   const total = Math.min(100, Math.max(0, raw));
+  if (!Number.isFinite(total)) {
+    throw new Error(`scorer produced a non-finite total (raw=${raw})`);
+  }
   if (total !== raw) {
     signals.push({
       name: "clamp",

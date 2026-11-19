@@ -30,6 +30,10 @@ export interface DigestPr {
   createdAt: string;
   /** CI rollup: 'green' | 'red' | 'pending' | 'none'. */
   ci: string;
+  /** ISO timestamp of the snapshot this member was scored from (F13). */
+  snapshotAt: string;
+  /** True when the snapshot is older than 24h at digest build time (F13). */
+  stale: boolean;
 }
 
 export interface DigestClusterInput {
@@ -49,6 +53,10 @@ export interface DigestCluster {
     band: string;
     top_reasons: string[];
     ci: string;
+    /** True when the member's snapshot is older than 24h (F13). */
+    stale: boolean;
+    /** ISO timestamp of the snapshot this member was scored from (F13). */
+    snapshot_at: string;
   }[];
   max_risk: number;
   max_band: string;
@@ -124,6 +132,8 @@ export function buildDigest(
         band: m.score.band,
         top_reasons: topReasons(m.score),
         ci: m.ci,
+        stale: m.stale,
+        snapshot_at: m.snapshotAt,
       })),
       max_risk: maxRisk,
       max_band: maxBand,

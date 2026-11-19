@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import * as store from "./store.js";
 import { buildDigestForRepo } from "./digestBuild.js";
 import {
+  adminHeaders,
   fakeCheck,
   fakeFile,
   fakePr,
@@ -46,6 +47,7 @@ test("S-4: two installations with the same repo name see zero of each other's ro
     const q111 = await t.app.inject({
       method: "GET",
       url: `/api/queue?installation_id=111&repo=acme%2Fapp`,
+      headers: adminHeaders(),
     });
     assert.equal(q111.statusCode, 200);
     const body111 = JSON.parse(q111.body) as { prs: { title: string }[] };
@@ -55,6 +57,7 @@ test("S-4: two installations with the same repo name see zero of each other's ro
     const q222 = await t.app.inject({
       method: "GET",
       url: `/api/queue?installation_id=222&repo=acme%2Fapp`,
+      headers: adminHeaders(),
     });
     assert.equal(q222.statusCode, 200);
     const body222 = JSON.parse(q222.body) as { prs: { title: string }[] };
@@ -65,6 +68,7 @@ test("S-4: two installations with the same repo name see zero of each other's ro
     const q999 = await t.app.inject({
       method: "GET",
       url: `/api/queue?installation_id=999&repo=acme%2Fapp`,
+      headers: adminHeaders(),
     });
     assert.equal(q999.statusCode, 400);
   } finally {
@@ -110,7 +114,7 @@ test("D-5: a human split is recorded and is not silently re-applied", async () =
     const split = await t.app.inject({
       method: "POST",
       url: "/api/cluster/action",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...adminHeaders() },
       payload: JSON.stringify({
         installation_id: INSTALLATION,
         repo: REPO,
@@ -222,6 +226,77 @@ test("A-6: old merged snapshots are pruned, digests are retained", async () => {
     const digest = await store.getDigest(t.tdb.pool, tenant.id, repo.id, "2026-11-19");
     assert.ok(digest);
     assert.equal(digest.digest_id, digestId);
+  } finally {
+    await t.close();
+  }
+});
+
+test("F7: concurrent digest builds report created exactly once", async () => {
+  const t = await makeTestApp();
+  try {
+    for (const n of [7, 8]) {
+      t.github.addPr(111, "acme/app", fakePr({ number: n }), [fakeFile(`src/f${n}.ts`)], [fakeCheck("ci")]);
+      await postWebhook(t.app, { deliveryId: `f7-${n}`, payload: prPayload(111, "acme/app", n) });
+    }
+    await t.worker.drain();
+    const [r1, r2] = await Promise.all([
+      t.app.inject({ method: "POST", url: "/api/digest/build", headers: { "content-type": "application/json", ...adminHeaders() }, payload: JSON.stringify({ installation_id: 111, repo: "acme/app", date: "2026-11-19" }) }),
+      t.app.inject({ method: "POST", url: "/api/digest/build", headers: { "content-type": "application/json", ...adminHeaders() }, payload: JSON.stringify({ installation_id: 111, repo: "acme/app", date: "2026-11-19" }) }),
+    ]);
+    const b1 = JSON.parse(r1.body) as { digest_id: string; created: boolean };
+    const b2 = JSON.parse(r2.body) as { digest_id: string; created: boolean };
+    assert.equal(b1.digest_id, b2.digest_id);
+    assert.equal([b1.created, b2.created].filter(Boolean).length, 1, "exactly one build reports created=true");
+    const issued = await t.tdb.pool.query(`SELECT COUNT(*)::int AS n FROM audit_log WHERE kind = 'digest_issued'`);
+    assert.equal(issued.rows[0].n, 1);
+  } finally {
+    await t.close();
+  }
+});
+
+test("F8: a split that omits a member keeps it in the queue as a singleton", async () => {
+  const t = await makeTestApp();
+  try {
+    const INSTALLATION = 111;
+    const REPO = "acme/app";
+    for (const n of [7, 8, 9]) {
+      t.github.addPr(INSTALLATION, REPO, fakePr({ number: n }), [fakeFile("src/shared.ts"), fakeFile(`src/f${n}.ts`)], [fakeCheck("ci")]);
+      await postWebhook(t.app, { deliveryId: `f8-${n}`, payload: prPayload(INSTALLATION, REPO, n) });
+    }
+    await t.worker.drain();
+    const tenant = await store.getTenantByInstallation(t.tdb.pool, INSTALLATION);
+    assert.ok(tenant);
+    const repo = await store.getRepo(t.tdb.pool, tenant.id, REPO);
+    assert.ok(repo);
+    let clusters = await store.listClusters(t.tdb.pool, tenant.id, repo.id);
+    assert.equal(clusters.length, 1);
+    const key = clusters[0].cluster_key;
+    // Split {7,8,9} into [[7],[8]] via the API — PR 9 is in neither group.
+    const split = await t.app.inject({
+      method: "POST",
+      url: "/api/cluster/action",
+      headers: { "content-type": "application/json", ...adminHeaders() },
+      payload: JSON.stringify({ installation_id: INSTALLATION, repo: REPO, cluster_key: key, action: "split", actor: "tester", reason: "test split", groups: [[7], [8]] }),
+    });
+    assert.equal(split.statusCode, 200);
+    // The stored correction itself was normalized to cover PR 9.
+    const stored = await t.tdb.pool.query(`SELECT correction FROM cluster_corrections WHERE cluster_key = $1`, [key]);
+    const groups = (stored.rows[0].correction as { split: { groups: number[][] } }).split.groups;
+    assert.deepEqual(groups, [[7], [8], [9]]);
+    await store.enqueueJob(
+      t.tdb.pool,
+      "backfill",
+      `backfill-f8-${Date.now()}`,
+      { installation_id: INSTALLATION, repo_full_name: REPO },
+    );
+    await t.worker.drain();
+    clusters = await store.listClusters(t.tdb.pool, tenant.id, repo.id);
+    const queued = new Set<number>();
+    for (const c of clusters) {
+      const rows = await t.tdb.pool.query(`SELECT number FROM pull_requests WHERE id = ANY($1::uuid[])`, [c.member_pr_ids]);
+      for (const r of rows.rows as { number: number }[]) queued.add(r.number);
+    }
+    assert.deepEqual([...queued].sort(), [7, 8, 9]);
   } finally {
     await t.close();
   }

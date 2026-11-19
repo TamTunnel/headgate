@@ -9,7 +9,10 @@
  * Edges (any one forms an edge):
  *   - Jaccard similarity >= 0.5 on changed-file sets
  *   - same linked issue / ticket
- *   - same head-branch lineage (same branch, or same prefix before '/')
+ *   - same head-branch lineage (identical branch, or a shared prefix
+ *     before '/' that is a known agent prefix — see
+ *     DEFAULT_AGENT_BRANCH_PREFIXES; `feature/*` and `dependabot/*`
+ *     do not count)
  *   - near-identical diff hash
  *
  * Deterministic regardless of ingestion order (D-2): members are always
@@ -41,24 +44,49 @@ export interface Cluster {
 
 export const FILE_JACCARD_THRESHOLD = 0.5;
 
+/** Agent branch prefixes that imply related work (F4). Only these
+ *  prefixes count as a shared head-branch lineage; `feature/*`,
+ *  `dependabot/*`, and every other human/bot namespace do not — a
+ *  shared prefix there is a naming convention, not related work.
+ *  This is the built-in default; a repo can override it in config
+ *  (`repos.agent_branch_prefixes`), never in code. */
+export const DEFAULT_AGENT_BRANCH_PREFIXES = [
+  "devin",
+  "cursor",
+  "copilot",
+  "codex",
+  "agent",
+  "sweep",
+];
+
 export function jaccard(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 && b.size === 0) return 1;
+  // F5: two empty sets share nothing — they must not cluster.
+  if (a.size === 0 && b.size === 0) return 0;
   let inter = 0;
   for (const x of a) if (b.has(x)) inter++;
   const union = a.size + b.size - inter;
   return union === 0 ? 0 : inter / union;
 }
 
-/** Branch lineage: same branch, or the same prefix before the first '/'
- *  (e.g. `devin/123-foo` and `devin/456-bar` share the `devin` agent
- *  session prefix). A bare branch with no '/' never matches another
- *  branch by prefix. */
-export function sameBranchLineage(a: string, b: string): boolean {
+/** Branch lineage: the identical full branch, or a shared prefix
+ *  before the first '/' that is a known agent prefix (F4). A bare
+ *  branch with no '/' never matches another branch by prefix. */
+export function sameBranchLineage(
+  a: string,
+  b: string,
+  prefixes: string[] = DEFAULT_AGENT_BRANCH_PREFIXES,
+): boolean {
   if (!a || !b) return false;
   if (a === b) return true;
   const pa = a.split("/")[0];
   const pb = b.split("/")[0];
-  return a.includes("/") && b.includes("/") && pa === pb && pa.length > 0;
+  return (
+    a.includes("/") &&
+    b.includes("/") &&
+    pa === pb &&
+    pa.length > 0 &&
+    prefixes.includes(pa)
+  );
 }
 
 export function clusterKey(members: number[]): string {
@@ -69,7 +97,10 @@ export function clusterKey(members: number[]): string {
     .slice(0, 16);
 }
 
-export function clusterPrs(prs: ClusterPr[]): Cluster[] {
+export function clusterPrs(
+  prs: ClusterPr[],
+  agentPrefixes: string[] = DEFAULT_AGENT_BRANCH_PREFIXES,
+): Cluster[] {
   const sorted = [...prs].sort((a, b) => a.number - b.number);
   const parent = new Map<number, number>();
   const find = (x: number): number => {
@@ -119,7 +150,7 @@ export function clusterPrs(prs: ClusterPr[]): Cluster[] {
           detail: `PR #${a.number} and PR #${b.number} both link issue #${sharedIssue}`,
         });
       }
-      if (sameBranchLineage(a.headBranch, b.headBranch)) {
+      if (sameBranchLineage(a.headBranch, b.headBranch, agentPrefixes)) {
         addEdge(a.number, b.number, {
           kind: "branch",
           detail: `PR #${a.number} and PR #${b.number} share head-branch lineage (${a.headBranch} / ${b.headBranch})`,

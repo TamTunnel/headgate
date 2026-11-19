@@ -9,7 +9,7 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { Pool } from "pg";
+import type { Db } from "./db";
 
 export function signPayload(secret: string, body: Buffer): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
@@ -33,13 +33,14 @@ export function verifySignature(
 }
 
 /** Record a delivery id. Returns true when this is the first time the
- *  id was seen; false on a replay (unique-key conflict). */
+ *  id was seen; false on a replay (unique-key conflict). Takes a Db so
+ *  the caller can run it inside a transaction (F3). */
 export async function recordDelivery(
-  pool: Pool,
+  db: Db,
   deliveryId: string,
   event: string,
 ): Promise<boolean> {
-  const res = await pool.query(
+  const res = await db.query(
     `INSERT INTO deliveries (delivery_id, event) VALUES ($1, $2)
      ON CONFLICT (delivery_id) DO NOTHING`,
     [deliveryId, event],

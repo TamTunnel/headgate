@@ -10,13 +10,34 @@
  */
 
 import type { Pool } from "pg";
-import { clusterPrs, type ClusterPr } from "./cluster";
+import {
+  clusterPrs,
+  DEFAULT_AGENT_BRANCH_PREFIXES,
+  type ClusterPr,
+} from "./cluster";
 import { buildDigest, type DigestClusterInput, type DigestExcluded, type DigestPr } from "./digest";
 import { createHash } from "node:crypto";
 import * as store from "./store";
 
 export function todayDateString(now = new Date()): string {
   return now.toISOString().slice(0, 10);
+}
+
+/** F13: a snapshot is stale when it is older than 24h at digest build
+ *  time. A missing or unparseable snapshot time counts as stale — the
+ *  digest must say so rather than silently present old data as fresh. */
+export const STALE_SNAPSHOT_MS = 24 * 60 * 60 * 1000;
+export function snapshotIsStale(
+  snapshotAt: string | Date | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  if (!snapshotAt) return true;
+  const t =
+    snapshotAt instanceof Date
+      ? snapshotAt.getTime()
+      : new Date(snapshotAt).getTime();
+  if (Number.isNaN(t)) return true;
+  return nowMs - t > STALE_SNAPSHOT_MS;
 }
 
 /** pg returns timestamptz columns as Date objects; digest content
@@ -39,11 +60,15 @@ export async function buildDigestForRepo(
   if (existing) return { digestId: existing.digest_id, created: false };
 
   const repo = await pool.query(
-    `SELECT sensitive_paths FROM repos WHERE id = $1`,
+    `SELECT sensitive_paths, agent_branch_prefixes FROM repos WHERE id = $1`,
     [repoId],
   );
   const sensitivePaths: string[] =
     (repo.rows[0]?.sensitive_paths as string[]) ?? [];
+  const agentPrefixes: string[] =
+    (repo.rows[0]?.agent_branch_prefixes as string[] | null)?.length
+      ? (repo.rows[0].agent_branch_prefixes as string[])
+      : DEFAULT_AGENT_BRANCH_PREFIXES;
 
   const openPrs = await store.listOpenPrs(pool, tenantId, repoId);
 
@@ -68,7 +93,7 @@ export async function buildDigestForRepo(
       diffHash: pr.diff_hash,
     });
   }
-  const clusters = clusterPrs(clusterInputs);
+  const clusters = clusterPrs(clusterInputs, agentPrefixes);
   await store.reclusterRepo(pool, tenantId, repoId, clusters);
 
   // Human decisions that exclude PRs/clusters from the digest (D-6):
@@ -143,6 +168,8 @@ export async function buildDigestForRepo(
         score: score ?? { score: 0, band: "low", signals: [] },
         createdAt: isoDate(pr.created_at_pr),
         ci: store.ciRollup(checks),
+        snapshotAt: isoDate(pr.snapshot_at),
+        stale: snapshotIsStale(pr.snapshot_at),
       };
       // "Remove from cluster": the PR leaves its cluster and stands
       // alone as a singleton in the digest.
@@ -199,6 +226,8 @@ export async function buildDigestForRepo(
           score: score ?? { score: 0, band: "low", signals: [] },
           createdAt: isoDate(pr.created_at_pr),
           ci: store.ciRollup(checks),
+          snapshotAt: isoDate(pr.snapshot_at),
+          stale: snapshotIsStale(pr.snapshot_at),
         },
       ],
       edges: [],
@@ -212,6 +241,11 @@ export async function buildDigestForRepo(
     excluded,
     escalatedClusters,
   );
-  await store.storeDigest(pool, tenantId, repoId, date, digestId, content);
-  return { digestId, created: true };
+  // F7: `created` comes from the insert itself, not from the
+  // check-then-act above — two concurrent builds for the same
+  // (tenant, repo, date) both pass the early getDigest check, but only
+  // the winner of the insert reports created=true, so exactly one
+  // digest_issued audit entry is written.
+  const created = await store.storeDigest(pool, tenantId, repoId, date, digestId, content);
+  return { digestId, created };
 }

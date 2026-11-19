@@ -167,3 +167,41 @@ test("topReasons lists the three largest positive signals", () => {
   assert.ok(reasons.length >= 1);
   assert.match(reasons[0], /\+/);
 });
+
+test("F6: negative inputs clamp to finite scores with non-negative signals", () => {
+  const neg = scorePr(
+    baseInput({
+      files: [{ path: "a.ts", additions: -200, deletions: -50, patch: "" }],
+      forcePushes: -3,
+      commitsAfterTouch: -2,
+      daysStale: -5,
+      author: { isBot: false, firstPrInRepo: false, priorReverts: -4 },
+      overlap: { overlappingPrs: -2, sharesLinkedIssue: false },
+    }),
+  );
+  assert.ok(Number.isFinite(neg.score));
+  assert.ok(neg.score >= 0 && neg.score <= 100);
+  assert.ok(neg.signals.every((s) => s.points >= 0 || s.name === "clamp"));
+  const sum = neg.signals.reduce((n, s) => n + s.points, 0);
+  assert.equal(sum, neg.score);
+  // A non-finite input never produces a NaN score either.
+  const nan = scorePr(
+    baseInput({
+      files: [{ path: "a.ts", additions: Number.NaN, deletions: 0, patch: "" }],
+    }),
+  );
+  assert.ok(Number.isFinite(nan.score));
+});
+
+test("F10: a call split across lines still yields the static finding", () => {
+  const findings = staticFindings([
+    { path: "a.ts", additions: 2, deletions: 0, patch: "+spawn\n+('ls')" },
+  ]);
+  assert.deepEqual(findings.map((f) => f.kind), ["subprocess"]);
+  // Single-line calls still match, and the '+' marker never leaks
+  // into evidence.
+  const single = staticFindings([
+    { path: "a.ts", additions: 1, deletions: 0, patch: "+exec('ls')" },
+  ]);
+  assert.deepEqual(single.map((f) => f.kind), ["subprocess"]);
+});

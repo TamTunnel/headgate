@@ -22,6 +22,21 @@ const CONTENT_TYPES: Record<string, string> = {
 export function buildApp(deps: RouteDeps): FastifyInstance {
   const app = Fastify({ logger: false });
 
+  // F9: a malformed-JSON delivery is a 400, not a 500, and the body
+  // must not leak the parser's error detail (GitHub retries a 500;
+  // a 400 is final). Everything else falls through to Fastify's
+  // default error handling.
+  app.setErrorHandler((error, _req, reply) => {
+    const code = (error as { code?: string }).code;
+    if (
+      error instanceof SyntaxError ||
+      code === "FST_ERR_CTP_INVALID_JSON_BODY"
+    ) {
+      return reply.code(400).send({ error: "invalid JSON" });
+    }
+    return reply.send(error);
+  });
+
   // Keep the raw body for HMAC verification on the webhook route.
   // Fastify's JSON parser would otherwise consume the exact bytes.
   app.addContentTypeParser(
@@ -43,11 +58,12 @@ export function buildApp(deps: RouteDeps): FastifyInstance {
   registerRoutes(app, deps);
 
   // Dev-only seed endpoint, registered ONLY when the fake GitHub client
-  // is in use (GITHUB_CLIENT=fake). Lets the smoke script and local dev
-  // inject fake PR payloads into the in-memory client. It is never
-  // registered with the real HTTP client, so it cannot exist in
-  // production. It writes nothing to GitHub.
-  if (deps.github instanceof FakeGitHubClient) {
+  // is in use (GITHUB_CLIENT=fake) and the service is not in production.
+  // Lets the smoke script and local dev inject fake PR payloads into the
+  // in-memory client. It is never registered with the real HTTP client,
+  // so it cannot exist in production. It writes nothing to GitHub. It is
+  // also behind the operator token like every other /api/* route (F1).
+  if (deps.github instanceof FakeGitHubClient && !deps.config.isProduction) {
     const fakeGithub = deps.github;
     app.post("/api/dev/seed-pr", async (req, reply) => {
       const b = (req.body ?? {}) as Record<string, unknown>;

@@ -36,6 +36,8 @@ function digestWithTitle(title: string): DigestContent {
             band: "critical",
             top_reasons: ["size +20: 5000 lines changed"],
             ci: "green",
+            stale: false,
+            snapshot_at: "2026-11-19T08:00:00Z",
           },
         ],
         max_risk: 80,
@@ -95,4 +97,47 @@ test("email contains no diff hunks or code", () => {
   assert.ok(!text.includes("@@"));
   assert.match(text, /Headgate daily digest/);
   assert.match(text, /triage, not review/);
+});
+
+test("F2: PEM blocks, JWTs, and bare high-entropy secrets do not survive into the email", () => {
+  const pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----";
+  const jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsRRk";
+  const bare = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY";
+  for (const secret of [pem, jwt, bare]) {
+    const { html, text } = renderDigestEmail(
+      digestWithTitle(`leaked ${secret}`),
+      "http://localhost:3000",
+    );
+    assert.ok(!html.includes(secret), `HTML email contains ${secret.slice(0, 20)}…`);
+    assert.ok(!text.includes(secret), `text email contains ${secret.slice(0, 20)}…`);
+  }
+  assert.equal(redactSecrets("hello world"), "hello world");
+  // URLs are exempt from the bare-token pattern: the digest link survives.
+  assert.ok(
+    redactSecrets("see https://github.com/acme/app/pull/7 for details").includes(
+      "https://github.com/acme/app/pull/7",
+    ),
+  );
+});
+
+test("F2: edge_reasons and excluded reasons are redacted in both renders", () => {
+  const akia = "AKIAIOSFODNN7EXAMPLE";
+  const content = digestWithTitle("normal title");
+  content.clusters[0].edge_reasons = [
+    `PR #1 and PR #2 share head-branch lineage (${akia} / devin/2-x)`,
+  ];
+  content.excluded = [{ pr_number: 9, reason: `snoozed: ${akia}` }];
+  const { html, text } = renderDigestEmail(content, "http://localhost:3000");
+  assert.ok(!html.includes(akia), "HTML email contains AKIA from edge_reasons/excluded");
+  assert.ok(!text.includes(akia), "text email contains AKIA from edge_reasons/excluded");
+  assert.ok(html.includes("[redacted]"));
+  assert.ok(text.includes("[redacted]"));
+});
+
+test("F13: a stale member is marked in both renders", () => {
+  const content = digestWithTitle("Old PR");
+  content.clusters[0].member_prs[0].stale = true;
+  const { html, text } = renderDigestEmail(content, "http://localhost:3000");
+  assert.ok(html.includes("stale snapshot"));
+  assert.ok(text.includes("stale snapshot"));
 });

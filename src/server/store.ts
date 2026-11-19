@@ -39,6 +39,8 @@ export interface RepoRow {
   full_name: string;
   digest_hour: number;
   sensitive_paths: string[];
+  /** Agent branch prefixes for clustering (F4); null/empty = default. */
+  agent_branch_prefixes: string[] | null;
 }
 
 export interface PrRow {
@@ -64,6 +66,9 @@ export interface PrRow {
   force_pushes: number;
   commits_after_touch: number;
   snapshot: Record<string, unknown>;
+  /** When the snapshot was taken; the digest marks it stale past 24h (F13).
+   *  pg returns timestamptz as a Date; isoDate() normalizes it. */
+  snapshot_at: string | Date | null;
 }
 
 export async function ensureTenant(
@@ -135,6 +140,17 @@ export async function getRepo(
   const res = await db.query(
     `SELECT * FROM repos WHERE tenant_id = $1 AND full_name = $2`,
     [tenantId, fullName],
+  );
+  return (res.rows[0] as RepoRow | undefined) ?? null;
+}
+
+export async function getRepoById(
+  db: Db,
+  repoId: string,
+): Promise<RepoRow | null> {
+  const res = await db.query(
+    `SELECT * FROM repos WHERE id = $1`,
+    [repoId],
   );
   return (res.rows[0] as RepoRow | undefined) ?? null;
 }
@@ -401,14 +417,28 @@ export async function reclusterRepo(
     const corr = correctionByKey.get(c.key);
     const splitGroups = corr?.split as { groups?: number[][] } | undefined;
     if (splitGroups?.groups && Array.isArray(splitGroups.groups)) {
+      const covered = new Set<number>();
       for (const g of splitGroups.groups) {
         const members = [...g].sort((a, b) => a - b);
         if (members.length === 0) continue;
+        for (const m of members) covered.add(m);
         out.push({
           key: clusterKey(members),
           members,
           edges: c.edges,
         });
+      }
+      // F8: a member of the original cluster covered by no group
+      // becomes a singleton — a split must never silently drop a PR
+      // from the live queue.
+      for (const m of c.members) {
+        if (!covered.has(m)) {
+          out.push({
+            key: clusterKey([m]),
+            members: [m],
+            edges: c.edges,
+          });
+        }
       }
       consumed.add(c.key);
       continue;
@@ -468,13 +498,46 @@ export async function recordClusterCorrection(
   actor: string,
   reason: string,
 ): Promise<void> {
+  // F8: validate a split on write — a split whose groups do not cover
+  // every member of the cluster is normalized by appending the uncovered
+  // members as singleton groups, so the stored correction can never
+  // express "drop this PR".
+  let stored: Record<string, unknown> = correction;
+  const split = correction.split as { groups?: number[][] } | undefined;
+  if (split?.groups && Array.isArray(split.groups)) {
+    const cluster = await pool.query(
+      `SELECT member_pr_ids FROM clusters
+       WHERE tenant_id = $1 AND repo_id = $2 AND cluster_key = $3`,
+      [tenantId, repoId, clusterKey],
+    );
+    const ids = (cluster.rows[0]?.member_pr_ids as string[] | undefined) ?? [];
+    if (ids.length > 0) {
+      const nums = await pool.query(
+        `SELECT number FROM pull_requests WHERE id = ANY($1::uuid[])`,
+        [ids],
+      );
+      const all = new Set(
+        (nums.rows as { number: number }[]).map((r) => r.number),
+      );
+      const covered = new Set(split.groups.flat());
+      const missing = [...all].filter((n) => !covered.has(n)).sort((a, b) => a - b);
+      if (missing.length > 0) {
+        stored = {
+          ...correction,
+          split: {
+            groups: [...split.groups, ...missing.map((n) => [n])],
+          },
+        };
+      }
+    }
+  }
   await pool.query(
     `INSERT INTO cluster_corrections (tenant_id, repo_id, cluster_key, correction, actor, reason)
      VALUES ($1,$2,$3,$4,$5,$6)
      ON CONFLICT (repo_id, cluster_key) DO UPDATE SET
        correction = EXCLUDED.correction, actor = EXCLUDED.actor,
        reason = EXCLUDED.reason, created_at = now()`,
-    [tenantId, repoId, clusterKey, JSON.stringify(correction), actor, reason],
+    [tenantId, repoId, clusterKey, JSON.stringify(stored), actor, reason],
   );
 }
 
@@ -505,13 +568,17 @@ export async function storeDigest(
   date: string,
   digestId: string,
   content: DigestContent,
-): Promise<void> {
-  await pool.query(
+): Promise<boolean> {
+  // Returns whether this call inserted the row (F7): two concurrent
+  // builds for the same (tenant, repo, date) race here, and only the
+  // winner may report created=true / audit a digest_issued entry.
+  const res = await pool.query(
     `INSERT INTO digests (tenant_id, repo_id, digest_date, digest_id, content)
      VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (repo_id, digest_date) DO NOTHING`,
     [tenantId, repoId, date, digestId, JSON.stringify(content)],
   );
+  return (res.rowCount ?? 0) > 0;
 }
 
 export async function getDigest(
@@ -630,12 +697,27 @@ export async function appendAudit(
     );
     await client.query("COMMIT");
     if (auditLogPath) {
+      // F12: the mirror write must never hang a request. Node's
+      // recursive mkdir spins forever on procfs: it never resolves or
+      // rejects, and an orphaned call keeps the event loop alive, so a
+      // timeout race alone does NOT fix this — the request returns but
+      // the process can never exit and a threadpool slot leaks. The
+      // mirror therefore NEVER calls recursive mkdir: append directly
+      // (the configured dir normally exists); on ENOENT only, try one
+      // non-recursive mkdir of the parent and retry once. Every
+      // operation here fails fast. The DB is the store of record.
       try {
-        await mkdir(dirname(auditLogPath), { recursive: true });
         await appendFile(auditLogPath, `${canonicalize(entry)}\n`, "utf8");
-      } catch {
-        // The DB is the store of record; a failed file mirror must not
-        // fail the action. The verifier reads the DB.
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          try {
+            await mkdir(dirname(auditLogPath));
+            await appendFile(auditLogPath, `${canonicalize(entry)}\n`, "utf8");
+          } catch {
+            // Best-effort mirror: ignore write failures.
+          }
+        }
+        // Any other failure (EACCES, EROFS, ENOTDIR, ...) is ignored too.
       }
     }
     return entry;
@@ -692,13 +774,13 @@ export interface JobRow {
 }
 
 export async function enqueueJob(
-  pool: Pool,
+  db: Db,
   type: string,
   idempotencyKey: string,
   payload: Record<string, unknown>,
   maxAttempts = 5,
 ): Promise<boolean> {
-  const res = await pool.query(
+  const res = await db.query(
     `INSERT INTO jobs (type, idempotency_key, payload, max_attempts)
      VALUES ($1,$2,$3,$4) ON CONFLICT (idempotency_key) DO NOTHING`,
     [type, idempotencyKey, JSON.stringify(payload), maxAttempts],

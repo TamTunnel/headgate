@@ -23,8 +23,14 @@ export function escapeHtml(s: string): string {
 }
 
 /** Redact credential-shaped material. Applied to every string rendered
- *  into email (and to log lines that carry PR titles). */
+ *  into email (and to log lines that carry PR titles). Specific
+ *  patterns run first; the bare high-entropy pattern runs last, after
+ *  the specific ones, and exempts URLs (F2). */
 const SECRET_PATTERNS: RegExp[] = [
+  // PEM blocks (multiline).
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+  // JWTs.
+  /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
   /\bghp_[A-Za-z0-9]{20,}\b/g,
   /\bgho_[A-Za-z0-9]{20,}\b/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
@@ -34,9 +40,18 @@ const SECRET_PATTERNS: RegExp[] = [
   /\b[A-Za-z0-9._-]*?(?:token|secret|password|api[_-]?key)\s*[:=]\s*['"]?[A-Za-z0-9+/=_-]{8,}['"]?/gi,
 ];
 
+/** Bare high-entropy tokens (32+ chars, no keyword nearby). Applied
+ *  last, after the specific patterns; URLs are exempt (a long token
+ *  inside a URL is left alone — the URL is a link, not a secret). */
+const BARE_TOKEN_RE =
+  /https?:\/\/\S+|(\b[A-Za-z0-9+/=_-]{32,}\b)/g;
+
 export function redactSecrets(text: string): string {
   let out = text;
   for (const re of SECRET_PATTERNS) out = out.replace(re, "[redacted]");
+  out = out.replace(BARE_TOKEN_RE, (m, tok) =>
+    tok === undefined ? m : "[redacted]",
+  );
   return out;
 }
 
@@ -80,13 +95,13 @@ export function renderDigestEmail(
         .map(
           (m) =>
             `<li><a href="${escapeHtml(m.url)}">PR #${m.number}</a> — ${escapeHtml(redactSecrets(m.title))} ` +
-            `(${escapeHtml(m.author)}, risk ${m.score} ${escapeHtml(m.band)}, CI ${escapeHtml(m.ci)})` +
+            `(${escapeHtml(m.author)}, risk ${m.score} ${escapeHtml(m.band)}, CI ${escapeHtml(m.ci)}${m.stale ? ", stale snapshot" : ""})` +
             `<br><small>${escapeHtml(redactSecrets(m.top_reasons.join(" | ")))}</small></li>`,
         )
         .join("");
       return (
         `<h3>${escapeHtml(redactSecrets(c.summary))} — ${c.max_risk} (${escapeHtml(c.max_band)})</h3>` +
-        `<p>${c.member_count} PR(s). ${escapeHtml(c.edge_reasons.join("; "))}</p>` +
+        `<p>${c.member_count} PR(s). ${escapeHtml(redactSecrets(c.edge_reasons.join("; ")))}</p>` +
         `<ul>${members}</ul>`
       );
     })
@@ -97,7 +112,7 @@ export function renderDigestEmail(
       ? `<h3>Excluded from this digest</h3><ul>${content.excluded
           .map(
             (e) =>
-              `<li>PR #${e.pr_number} — ${escapeHtml(e.reason)}</li>`,
+              `<li>PR #${e.pr_number} — ${escapeHtml(redactSecrets(e.reason))}</li>`,
           )
           .join("")}</ul>`
       : "";
@@ -117,10 +132,13 @@ export function renderDigestEmail(
       const members = c.member_prs
         .map(
           (m) =>
-            `  - PR #${m.number}: ${redactSecrets(m.title)} (${m.author}, risk ${m.score} ${m.band}, CI ${m.ci})\n    ${redactSecrets(m.top_reasons.join(" | "))}\n    ${m.url}`,
+            `  - PR #${m.number}: ${redactSecrets(m.title)} (${m.author}, risk ${m.score} ${m.band}, CI ${m.ci}${m.stale ? ", stale snapshot" : ""})\n    ${redactSecrets(m.top_reasons.join(" | "))}\n    ${m.url}`,
         )
         .join("\n");
-      return `${redactSecrets(c.summary)} — ${c.max_risk} (${c.max_band})\n${members}`;
+      const edges = c.edge_reasons.length > 0
+        ? `\n  ${redactSecrets(c.edge_reasons.join("; "))}`
+        : "";
+      return `${redactSecrets(c.summary)} — ${c.max_risk} (${c.max_band})\n${members}${edges}`;
     })
     .join("\n\n");
 
@@ -132,7 +150,7 @@ export function renderDigestEmail(
     `Headgate scores are triage, not review: a low score is not permission to merge without reading, and a high score is not proof of a bug.\n\n` +
     clusterText +
     (content.excluded.length > 0
-      ? `\n\nExcluded from this digest:\n${content.excluded.map((e) => `  - PR #${e.pr_number} — ${e.reason}`).join("\n")}`
+      ? `\n\nExcluded from this digest:\n${content.excluded.map((e) => `  - PR #${e.pr_number} — ${redactSecrets(e.reason)}`).join("\n")}`
       : "") +
     `\n`;
 

@@ -42,6 +42,7 @@ Required environment:
 |---|---|
 | `DATABASE_URL` | Postgres connection string, e.g. `postgres://headgate:headgate-dev@127.0.0.1:5432/headgate` |
 | `GITHUB_WEBHOOK_SECRET` | Shared secret for webhook HMAC verification (set the same value in the GitHub App) |
+| `ADMIN_TOKEN` | Operator token: required on every `/api/*` route except `/api/health` (send as `Authorization: Bearer …` or `X-Headgate-Admin`). Required in production; in development it defaults to a dev-only value |
 | `GITHUB_APP_ID` | GitHub App id |
 | `GITHUB_APP_PRIVATE_KEY` | GitHub App private key (PEM) |
 | `GITHUB_APP_SLUG` | App slug, default `headgate` |
@@ -50,7 +51,7 @@ Optional:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PORT` / `HOST` | `3000` / `0.0.0.0` | Listen address |
+| `PORT` / `HOST` | `3000` / `127.0.0.1` | Listen address. The default binds localhost only; a non-localhost bind needs a reverse proxy in front, because the API is operator-only |
 | `BASE_URL` | `http://localhost:3000` | Public URL, used in digest links |
 | `DIGEST_HOUR` | `9` | Hour the daily digest is built |
 | `RETENTION_DAYS` | `30` | Snapshot retention for merged/closed PRs |
@@ -133,17 +134,17 @@ GitHub webhooks ──► /webhooks/github ──► deliveries (dedup by delive
 - **GitHub App + webhook receiver** (`src/server/webhook.ts`, `routes.ts`). Events: `pull_request`, `pull_request_review`, `check_run`, `check_suite`, `push`. Every delivery is verified by HMAC SHA-256 against the webhook secret, deduplicated by delivery id, and enqueued as a job. Installation tokens are fetched per job, held in memory only, never logged, never stored.
 - **Ingestion worker** (`src/server/worker.ts`). Consumes webhook jobs: fetches the PR snapshot (number, title, body, author + author type, bot identity, base/head SHAs, state, linked issues), the file list, and the check state. Upserts are idempotent on (installation, repo, PR number); a duplicate delivery produces no second snapshot. A backfill job reconciles open PRs against the API to repair missed deliveries.
 - **Risk scorer** (`src/server/scorer.ts`). Pure deterministic function over a snapshot + repo context. Score 0–100 + band (low / medium / high / critical). Signals, each with a fixed weight, each recorded with points + evidence: size (log-scaled, capped), blast radius (sensitive paths — the only per-repo config), test status, author fleet (bot baseline, first PR, prior reverts), overlap (shared files/issues), churn, staleness (capped), duplication (near-identical diff), static (deterministic regex pattern checks: new subprocess/shell exec, new network calls, credential handling, dependency additions). Weights are fixed in v1. The signals always sum exactly to the total (a `clamp` signal carries any clamping difference). No LLM anywhere.
-- **Clusterer** (`src/server/cluster.ts`). Graph over open PRs: Jaccard ≥ 0.5 on changed-file sets, same linked issue/ticket, same head-branch lineage, near-identical diff hash. Connected components are clusters; singletons are clusters of one. Deterministic regardless of ingestion order. Human split/merge corrections persist in `cluster_corrections` until the cluster membership changes underneath them.
+- **Clusterer** (`src/server/cluster.ts`). Graph over open PRs: Jaccard ≥ 0.5 on changed-file sets, same linked issue/ticket, same head-branch lineage (identical branch, or a shared prefix that is a known agent prefix — `devin/`, `cursor/`, `copilot/`, `codex/`, `agent/`, `sweep/` by default, overridable per repo in `repos.agent_branch_prefixes`; `feature/*` and `dependabot/*` never count), near-identical diff hash. Connected components are clusters; singletons are clusters of one. Deterministic regardless of ingestion order. Human split/merge corrections persist in `cluster_corrections` until the cluster membership changes underneath them.
 - **Digest builder** (`src/server/digest.ts`, `digestBuild.ts`). Once a day per repo, builds one `digest/1` record: clusters ordered by max risk desc, then member count desc, then oldest first (escalated clusters pin to the top). Each cluster gets a one-line summary assembled from member PR titles (first title + "and N more" — no LLM). The digest id is the SHA-256 of the canonical content; rebuilding from stored snapshots reproduces the identical id. Immutable once issued. Every open agent PR appears in the digest or in an explicit `excluded` list with a reason.
 - **Web UI** (`client/`). Today's digest (ordered clusters, risk bands, reasons, member PRs, CI state), the live queue, per-cluster actions, and the audit log view.
 - **Human action surface** (`routes.ts`). Per cluster: reviewed, snooze, assign, escalate, split, merge. Per PR: remove from cluster, snooze, assign. Headgate-side state only — nothing posts to GitHub.
-- **Audit log** (`src/server/audit.ts`, `store.ts`). Hash-chained JSONL (Vouchard/Successor pattern): every ingestion decision that changes queue state and every human action, each entry chained to the previous hash. Stored in Postgres and mirrored to `AUDIT_LOG_PATH`.
+- **Audit log** (`src/server/audit.ts`, `store.ts`). Hash-chained JSONL (Vouchard/Successor pattern): every ingestion decision that changes queue state and every human action, each entry chained to the previous hash. Stored in Postgres and mirrored to `AUDIT_LOG_PATH`. The Postgres chain is the store of record; the JSONL mirror is best-effort and is never verified — a tampered or diverged mirror is undetectable, so do not rely on the file as the tamper-evidence source.
 - **Email sender** (`src/server/email.ts`). Pluggable SMTP (nodemailer). HTML + plain text, metadata and links only — no code, no diffs, no secrets. Credential-shaped patterns in PR titles are redacted before rendering.
 
 ### Data model
 
 - `tenants` — GitHub App installation id, account, install state. Every other row carries `tenant_id`.
-- `repos` — (tenant, full_name), digest hour, sensitive-path list.
+- `repos` — (tenant, full_name), digest hour, sensitive-path list, agent-branch-prefix allowlist (clustering config).
 - `pull_requests` — (tenant, repo, number): author, bot identity, title, body, SHAs, state, linked issues, snapshot JSON.
 - `pr_files` — (pr, path): additions, deletions, status, patch.
 - `pr_checks` — (pr, check name): status, conclusion.
@@ -158,7 +159,7 @@ GitHub webhooks ──► /webhooks/github ──► deliveries (dedup by delive
 
 ### Tenancy
 
-App-layer scoping: every query filters by `tenant_id`. There is no row-level security in v1 (stated honestly). Cross-tenant reads return nothing because the tenant filter is on every query path.
+App-layer scoping: every query filters by `tenant_id`. There is no row-level security in v1 (stated honestly). Cross-tenant reads return nothing because the tenant filter is on every query path. But the tenant filter is not the security boundary — `installation_id` is caller-supplied, so every `/api/*` route except `/api/health` also requires the operator `ADMIN_TOKEN` (`Authorization: Bearer …` or `X-Headgate-Admin`, compared in constant time). Without it, no tenant's data is readable or mutable at all. The service binds `127.0.0.1` by default; expose it beyond localhost only behind a reverse proxy.
 
 ## Honest limits
 
@@ -200,7 +201,7 @@ The score's auditability is the point. An LLM's "risky" cannot be audited; a det
 The nightly backfill job reconciles open PRs against the GitHub API and repairs missed deliveries. Duplicate deliveries are deduplicated by delivery id.
 
 **What happens when GitHub's API rate limit is hit?**
-Ingestion backs off: jobs retry with jittered backoff, rate-limit errors re-queue with a 15-minute delay, and the digest notes which PRs are stale via their snapshot time instead of failing.
+Ingestion backs off: jobs retry with jittered backoff, rate-limit errors re-queue with a 15-minute delay, and the digest marks any PR whose snapshot is older than 24 hours as stale instead of failing.
 
 **Can I use it for GitLab?**
 Not in v1. The ingestion layer is behind the `GitHubClient` interface; a second forge is a new adapter, not a rewrite.

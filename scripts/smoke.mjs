@@ -12,6 +12,7 @@ import { createHmac } from "node:crypto";
 const PORT = Number(process.env.SMOKE_PORT ?? "3456");
 const BASE = `http://127.0.0.1:${PORT}`;
 const SECRET = "smoke-webhook-secret";
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? "smoke-admin-token";
 const INSTALLATION = 4242;
 const RUN_ID = Date.now().toString(36);
 const REPO = `acme/smoke-${RUN_ID}`;
@@ -22,7 +23,12 @@ function sign(body) {
 }
 
 async function req(path, init = {}) {
-  const res = await fetch(`${BASE}${path}`, init);
+  // F1: every /api/* route except /api/health needs the operator token.
+  const headers = { ...(init.headers ?? {}) };
+  if (path.startsWith("/api/") && path !== "/api/health") {
+    headers.authorization = `Bearer ${ADMIN_TOKEN}`;
+  }
+  const res = await fetch(`${BASE}${path}`, { ...init, headers });
   const text = await res.text();
   let body = {};
   try {
@@ -46,6 +52,7 @@ async function main() {
     NODE_ENV: "development",
     GITHUB_CLIENT: "fake",
     GITHUB_WEBHOOK_SECRET: SECRET,
+    ADMIN_TOKEN,
     DATABASE_URL:
       process.env.DATABASE_URL ??
       "postgres://headgate:headgate-dev@127.0.0.1:5432/headgate",

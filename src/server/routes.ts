@@ -4,16 +4,19 @@
 /**
  * HTTP routes. Tenant scoping: every repo-scoped endpoint requires an
  * installation_id (query param or X-Headgate-Installation header) and
- * every store call filters by that tenant (S-4). PR titles/bodies are
- * untrusted data: they are never interpolated into SQL (parameterized
- * queries only, in store.ts) and the dashboard renders them escaped
- * (React does this by default) (S-6).
+ * every store call filters by that tenant (S-4). On top of that, every
+ * /api/* route except /api/health requires the operator ADMIN_TOKEN
+ * (F1): installation_id is caller-supplied labeling, not a credential.
+ * PR titles/bodies are untrusted data: they are never interpolated into
+ * SQL (parameterized queries only, in store.ts) and the dashboard renders
+ * them escaped (React does this by default) (S-6).
  *
  * Headgate never writes to GitHub in v1: no endpoint approves, merges,
  * comments, or labels anything. "Reviewed" is a Headgate-side queue
  * state, not a GitHub state.
  */
 
+import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import type { HeadgateConfig } from "./config";
@@ -85,8 +88,37 @@ function repoParam(req: FastifyRequest): string {
   return str(q.repo ?? bodyOf(req).repo);
 }
 
+/** F1: the operator token, from `Authorization: Bearer …` or the
+ *  `X-Headgate-Admin` header, compared in constant time. An empty or
+ *  unconfigured token authenticates nobody (fail closed). */
+function adminTokenValid(req: FastifyRequest, adminToken: string): boolean {
+  if (!adminToken) return false;
+  const raw = req.headers.authorization ?? req.headers["x-headgate-admin"];
+  if (typeof raw !== "string") return false;
+  const token = raw.startsWith("Bearer ") ? raw.slice("Bearer ".length) : raw;
+  const a = Buffer.from(token, "utf8");
+  const b = Buffer.from(adminToken, "utf8");
+  if (a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   const { pool, config } = deps;
+
+  // F1: every /api/* route except /api/health requires the operator
+  // token. Webhooks keep HMAC auth and are not /api/*; the dashboard
+  // shell (/*) is public, but every data call it makes is /api/*.
+  app.addHook("onRequest", async (req, reply) => {
+    const url = req.url.split("?")[0];
+    if (!url.startsWith("/api/") || url === "/api/health") return;
+    if (!adminTokenValid(req, config.adminToken)) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+  });
 
   app.get("/api/health", async () => ({
     ok: true,
@@ -114,42 +146,64 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       return reply.code(400).send({ error: "missing X-GitHub-Delivery" });
     }
     const event = (req.headers["x-github-event"] as string | undefined) ?? "";
-    const seen = await recordDelivery(pool, deliveryId, event);
-    if (!seen) {
-      // Replay: acknowledged, not re-processed (S-9).
-      return reply.code(200).send({ ok: true, deduped: true });
-    }
-    let payload: Record<string, unknown>;
+    // F3: record the delivery and enqueue the job in ONE transaction.
+    // If the enqueue fails, the delivery row rolls back with it, so the
+    // redelivery GitHub sends is processed instead of deduped — the
+    // event is never silently lost (A-1).
+    const client = await pool.connect();
     try {
-      payload = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
-    } catch {
-      return reply.code(400).send({ error: "invalid JSON" });
+      await client.query("BEGIN");
+      const seen = await recordDelivery(client, deliveryId, event);
+      if (!seen) {
+        // Replay: acknowledged, not re-processed (S-9).
+        await client.query("ROLLBACK");
+        return reply.code(200).send({ ok: true, deduped: true });
+      }
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
+      } catch {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "invalid JSON" });
+      }
+      const installation = (payload.installation ?? {}) as Record<string, unknown>;
+      const repository = (payload.repository ?? {}) as Record<string, unknown>;
+      const pr = (payload.pull_request ?? {}) as Record<string, unknown>;
+      const installationId = Number(installation.id ?? 0);
+      const repoFullName = String(repository.full_name ?? "");
+      const prNumber = Number(pr.number ?? 0);
+      const account = (installation.account ?? {}) as Record<string, unknown>;
+      if (!installationId || !repoFullName || !prNumber) {
+        // Not a PR event we can act on (e.g. installation events):
+        // accepted, nothing enqueued. The delivery row rolls back too —
+        // a redelivery is re-examined, not deduped.
+        await client.query("ROLLBACK");
+        return reply.code(200).send({ ok: true, ignored: true });
+      }
+      await store.enqueueJob(
+        client,
+        "webhook",
+        `webhook:${deliveryId}`,
+        {
+          installation_id: installationId,
+          repo_full_name: repoFullName,
+          pr_number: prNumber,
+          account_login: String(account.login ?? ""),
+          event,
+        },
+      );
+      await client.query("COMMIT");
+      return reply.code(202).send({ ok: true, queued: true });
+    } catch (err) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // The connection is already gone; nothing left to roll back.
+      }
+      throw err;
+    } finally {
+      client.release();
     }
-    const installation = (payload.installation ?? {}) as Record<string, unknown>;
-    const repository = (payload.repository ?? {}) as Record<string, unknown>;
-    const pr = (payload.pull_request ?? {}) as Record<string, unknown>;
-    const installationId = Number(installation.id ?? 0);
-    const repoFullName = String(repository.full_name ?? "");
-    const prNumber = Number(pr.number ?? 0);
-    const account = (installation.account ?? {}) as Record<string, unknown>;
-    if (!installationId || !repoFullName || !prNumber) {
-      // Not a PR event we can act on (e.g. installation events):
-      // accepted, nothing enqueued.
-      return reply.code(200).send({ ok: true, ignored: true });
-    }
-    await store.enqueueJob(
-      pool,
-      "webhook",
-      `webhook:${deliveryId}`,
-      {
-        installation_id: installationId,
-        repo_full_name: repoFullName,
-        pr_number: prNumber,
-        account_login: String(account.login ?? ""),
-        event,
-      },
-    );
-    return reply.code(202).send({ ok: true, queued: true });
   });
 
   // ---- Tenants / repos ----

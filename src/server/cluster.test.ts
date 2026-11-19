@@ -90,6 +90,50 @@ test("singletons are clusters of one", () => {
   for (const c of clusters) assert.equal(c.members.length, 1);
 });
 
+test("F4: feature/* and dependabot/* prefixes do not imply related work", () => {
+  const feature = clusterPrs([
+    pr(1, { headBranch: "feature/login", files: ["src/login.ts"], diffHash: "h1" }),
+    pr(2, { headBranch: "feature/payments", files: ["src/pay.ts"], diffHash: "h2" }),
+  ]);
+  assert.equal(feature.length, 2);
+  const dependabot = clusterPrs([
+    pr(1, { headBranch: "dependabot/npm_and_yarn/lodash-4.17.21", files: ["package.json"], diffHash: "h1" }),
+    pr(2, { headBranch: "dependabot/npm_and_yarn/react-19.0.0", files: ["package-lock.json"], diffHash: "h2" }),
+    pr(3, { headBranch: "dependabot/npm_and_yarn/axios-1.7.0", files: ["yarn.lock"], diffHash: "h3" }),
+  ]);
+  assert.equal(dependabot.length, 3);
+  // The allowlist is config, not code: a custom list can admit a prefix.
+  const custom = clusterPrs(
+    [
+      pr(1, { headBranch: "feature/login", files: ["src/login.ts"], diffHash: "h1" }),
+      pr(2, { headBranch: "feature/payments", files: ["src/pay.ts"], diffHash: "h2" }),
+    ],
+    ["feature"],
+  );
+  assert.equal(custom.length, 1);
+});
+
+test("F5: two file-less PRs share nothing (Jaccard 0, no cluster)", () => {
+  assert.equal(jaccard(new Set(), new Set()), 0);
+  // Non-agent branches, so the branch edge must not fire either: the
+  // only candidate edge is file similarity, and empty sets share nothing.
+  // (The pr() default branch is agent/N-work, which IS an agent prefix
+  // and would cluster them by the branch edge — that is legitimate.)
+  const clusters = clusterPrs([
+    pr(1, { files: [], diffHash: "", headBranch: "feature/1-x" }),
+    pr(2, { files: [], diffHash: "", headBranch: "feature/2-y" }),
+  ]);
+  assert.equal(clusters.length, 2);
+  // Two file-less PRs on the SAME agent prefix still cluster — by the
+  // branch edge, not by file similarity.
+  const agentClusters = clusterPrs([
+    pr(1, { files: [], diffHash: "" }),
+    pr(2, { files: [], diffHash: "" }),
+  ]);
+  assert.equal(agentClusters.length, 1);
+  assert.equal(agentClusters[0].edges[0].kind, "branch");
+});
+
 test("D-2: shuffle ingestion order -> identical clusters (property test)", () => {
   const base: ClusterPr[] = [
     pr(1, { files: ["a.ts", "b.ts"], linkedIssues: [10], headBranch: "devin/1-a", diffHash: "d1" }),

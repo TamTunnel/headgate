@@ -21,6 +21,8 @@ interface DigestPr {
   band: string;
   top_reasons: string[];
   ci: string;
+  stale: boolean;
+  snapshot_at: string;
 }
 
 interface DigestCluster {
@@ -76,11 +78,33 @@ interface AuditEntry {
   hash: string;
 }
 
+// F1: every /api/* call (except /api/health) needs the operator token.
+// Prompted once per page load and kept in memory only — never stored.
+// On a 401 the token is cleared and the operator is prompted once more.
+let adminToken: string | null = null;
+function getAdminToken(): string {
+  if (adminToken === null) {
+    adminToken = window.prompt("Headgate admin token (operator only):") ?? "";
+  }
+  return adminToken;
+}
+
 async function api(
   path: string,
   init?: RequestInit,
 ): Promise<{ status: number; body: any }> {
-  const res = await fetch(path, { ...init });
+  const call = async (token: string) => {
+    const headers: Record<string, string> = {
+      ...(init?.headers as Record<string, string> | undefined),
+      Authorization: `Bearer ${token}`,
+    };
+    return fetch(path, { ...init, headers });
+  };
+  let res = await call(getAdminToken());
+  if (res.status === 401) {
+    adminToken = null;
+    res = await call(getAdminToken());
+  }
   let body: any = {};
   try {
     body = await res.json();
@@ -335,7 +359,8 @@ export default function App() {
                       PR #{m.number}
                     </a>{" "}
                     — {m.title} ({m.author}, risk {m.score} {m.band}, CI{" "}
-                    {m.ci})
+                    {m.ci}
+                    {m.stale ? ", stale snapshot" : ""})
                     <br />
                     <small>{m.top_reasons.join(" | ")}</small>
                   </li>

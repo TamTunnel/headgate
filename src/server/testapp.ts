@@ -16,6 +16,12 @@ import { Worker } from "./worker.js";
 import type { HeadgateConfig } from "./config.js";
 
 export const TEST_WEBHOOK_SECRET = "test-webhook-secret";
+export const TEST_ADMIN_TOKEN = "test-admin-token";
+
+/** Authorization header for the operator token (F1). */
+export function adminHeaders(): Record<string, string> {
+  return { authorization: `Bearer ${TEST_ADMIN_TOKEN}` };
+}
 
 export function testConfig(auditLogPath: string): HeadgateConfig {
   return {
@@ -23,6 +29,7 @@ export function testConfig(auditLogPath: string): HeadgateConfig {
     host: "127.0.0.1",
     databaseUrl: "",
     baseUrl: "http://localhost:3000",
+    adminToken: TEST_ADMIN_TOKEN,
     webhookSecret: TEST_WEBHOOK_SECRET,
     githubAppId: "",
     githubAppPrivateKey: "",

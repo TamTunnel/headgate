@@ -89,3 +89,24 @@ test("audit append assigns strictly increasing seqs from 1", async () => {
     await t.close();
   }
 });
+
+test("F12: an audit append with a hanging mirror path returns instead of hanging", async () => {
+  const t = await makeTestApp();
+  try {
+    const pool = t.tdb.pool;
+    const before = await store.listAuditEntries(pool, 100);
+    const start = Date.now();
+    // /proc/1/nope: Node's recursive mkdir spins forever here (the
+    // shell mkdir fails instantly). The mirror never calls it, so this
+    // must return fast with the DB entry written.
+    const entry = await store.appendAudit(pool, "/proc/1/nope/audit.jsonl", "probe", { tenant_id: 1 });
+    const ms = Date.now() - start;
+    assert.ok(ms < 2000, `appendAudit took ${ms}ms (must not hang on the mirror)`);
+    assert.ok(entry.seq > 0);
+    const after = await store.listAuditEntries(pool, 100);
+    assert.equal(after.length, before.length + 1);
+    assert.deepEqual(await store.verifyAudit(pool), { ok: true });
+  } finally {
+    await t.close();
+  }
+});
