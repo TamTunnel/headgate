@@ -254,6 +254,38 @@ test("F7: concurrent digest builds report created exactly once", async () => {
   }
 });
 
+test("B1: 10 concurrent digest builds return one digest id, no 500s", async () => {
+  const t = await makeTestApp();
+  try {
+    for (const n of [7, 8]) {
+      t.github.addPr(111, "acme/app", fakePr({ number: n }), [fakeFile(`src/f${n}.ts`)], [fakeCheck("ci")]);
+      await postWebhook(t.app, { deliveryId: `b1-${n}`, payload: prPayload(111, "acme/app", n) });
+    }
+    await t.worker.drain();
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        t.app.inject({ method: "POST", url: "/api/digest/build", headers: { "content-type": "application/json", ...adminHeaders() }, payload: JSON.stringify({ installation_id: 111, repo: "acme/app", date: "2026-11-19" }) }),
+      ),
+    );
+    for (const r of results) assert.equal(r.statusCode, 200, r.body.slice(0, 200));
+    const bodies = results.map((r) => JSON.parse(r.body) as { digest_id: string; created: boolean });
+    assert.equal(new Set(bodies.map((b) => b.digest_id)).size, 1, "all 10 builds return the same digest id");
+    assert.equal(bodies.filter((b) => b.created).length, 1, "exactly one build reports created=true");
+    const tenant = await store.getTenantByInstallation(t.tdb.pool, 111);
+    assert.ok(tenant);
+    const repo = await store.getRepo(t.tdb.pool, tenant.id, "acme/app");
+    assert.ok(repo);
+    const stored = await store.getDigest(t.tdb.pool, tenant.id, repo.id, "2026-11-19");
+    assert.ok(stored);
+    assert.equal(bodies[0].digest_id, stored.digest_id, "returned id is the stored id, not a phantom");
+    assert.equal(stored.content.clusters.length, 1, "stored digest has the deterministic single cluster");
+    const issued = await t.tdb.pool.query(`SELECT COUNT(*)::int AS n FROM audit_log WHERE kind = 'digest_issued'`);
+    assert.equal(issued.rows[0].n, 1);
+  } finally {
+    await t.close();
+  }
+});
+
 test("F8: a split that omits a member keeps it in the queue as a singleton", async () => {
   const t = await makeTestApp();
   try {
@@ -297,6 +329,62 @@ test("F8: a split that omits a member keeps it in the queue as a singleton", asy
       for (const r of rows.rows as { number: number }[]) queued.add(r.number);
     }
     assert.deepEqual([...queued].sort(), [7, 8, 9]);
+  } finally {
+    await t.close();
+  }
+});
+
+test("B2: an overlapping split correction cannot poison the repo", async () => {
+  const t = await makeTestApp();
+  try {
+    const INSTALLATION = 111;
+    const REPO = "acme/app";
+    for (const n of [7, 8, 9]) {
+      t.github.addPr(INSTALLATION, REPO, fakePr({ number: n }), [fakeFile("src/shared.ts"), fakeFile(`src/f${n}.ts`)], [fakeCheck("ci")]);
+      await postWebhook(t.app, { deliveryId: `b2-${n}`, payload: prPayload(INSTALLATION, REPO, n) });
+    }
+    await t.worker.drain();
+    const tenant = await store.getTenantByInstallation(t.tdb.pool, INSTALLATION);
+    assert.ok(tenant);
+    const repo = await store.getRepo(t.tdb.pool, tenant.id, REPO);
+    assert.ok(repo);
+    let clusters = await store.listClusters(t.tdb.pool, tenant.id, repo.id);
+    assert.equal(clusters.length, 1);
+    const key = clusters[0].cluster_key;
+    // Overlapping groups: PR 7 in two groups — an easy dashboard slip.
+    const split = await t.app.inject({
+      method: "POST",
+      url: "/api/cluster/action",
+      headers: { "content-type": "application/json", ...adminHeaders() },
+      payload: JSON.stringify({ installation_id: INSTALLATION, repo: REPO, cluster_key: key, action: "split", actor: "tester", reason: "overlapping split", groups: [[7], [7]] }),
+    });
+    assert.equal(split.statusCode, 200);
+    // The stored correction was collapsed to a partition of the members.
+    const stored = await t.tdb.pool.query(`SELECT correction FROM cluster_corrections WHERE cluster_key = $1`, [key]);
+    const groups = (stored.rows[0].correction as { split: { groups: number[][] } }).split.groups;
+    assert.deepEqual(groups, [[7], [8], [9]]);
+    // Ingest a PR that does not join the cluster: the recluster must
+    // not fail, and no PR may drop out of the live queue.
+    t.github.addPr(INSTALLATION, REPO, fakePr({ number: 10 }), [fakeFile("src/other.ts")], [fakeCheck("ci")]);
+    const w = await postWebhook(t.app, { deliveryId: "b2-10", payload: prPayload(INSTALLATION, REPO, 10) });
+    assert.equal(w.status, 202);
+    await t.worker.drain();
+    const dead = await t.tdb.pool.query(`SELECT COUNT(*)::int AS n FROM jobs WHERE state = 'dead'`);
+    assert.equal(dead.rows[0].n, 0);
+    clusters = await store.listClusters(t.tdb.pool, tenant.id, repo.id);
+    const queued = new Set<number>();
+    for (const c of clusters) {
+      const rows = await t.tdb.pool.query(`SELECT number FROM pull_requests WHERE id = ANY($1::uuid[])`, [c.member_pr_ids]);
+      for (const r of rows.rows as { number: number }[]) queued.add(r.number);
+    }
+    assert.deepEqual([...queued].sort((a, b) => a - b), [7, 8, 9, 10]);
+    const d = await t.app.inject({
+      method: "POST",
+      url: "/api/digest/build",
+      headers: { "content-type": "application/json", ...adminHeaders() },
+      payload: JSON.stringify({ installation_id: INSTALLATION, repo: REPO, date: "2026-11-19" }),
+    });
+    assert.equal(d.statusCode, 200);
   } finally {
     await t.close();
   }

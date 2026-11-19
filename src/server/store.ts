@@ -10,7 +10,7 @@
 
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { Pool, PoolClient } from "pg";
+import { Pool, type PoolClient } from "pg";
 import {
   appendAuditEntry,
   hashAuditEntry,
@@ -309,21 +309,21 @@ export async function authorContext(
 
 /** Score one stored PR and persist the result. Returns the score. */
 export async function scoreStoredPr(
-  pool: Pool,
+  db: Db,
   tenantId: string,
   repoId: string,
   pr: PrRow,
   sensitivePaths: string[],
 ): Promise<RiskScore> {
-  const files = await getPrFiles(pool, pr.id);
-  const checks = await getPrChecks(pool, pr.id);
-  const author = await authorContext(pool, tenantId, repoId, pr);
-  const open = await listOpenPrs(pool, tenantId, repoId);
+  const files = await getPrFiles(db, pr.id);
+  const checks = await getPrChecks(db, pr.id);
+  const author = await authorContext(db, tenantId, repoId, pr);
+  const open = await listOpenPrs(db, tenantId, repoId);
   const others = open.filter((o) => o.id !== pr.id);
   const myFiles = new Set(files.map((f) => f.path));
   let overlapping = 0;
   for (const o of others) {
-    const of = await getPrFiles(pool, o.id);
+    const of = await getPrFiles(db, o.id);
     if (of.some((f) => myFiles.has(f.path))) overlapping++;
   }
   const sharesIssue = others.some((o) =>
@@ -349,7 +349,7 @@ export async function scoreStoredPr(
     duplicateOfPr: duplicateOf ? duplicateOf.number : null,
     sensitivePaths,
   });
-  await pool.query(
+  await db.query(
     `INSERT INTO risk_scores (pr_id, score, band, signals) VALUES ($1,$2,$3,$4)`,
     [pr.id, score.score, score.band, JSON.stringify(score.signals)],
   );
@@ -394,12 +394,43 @@ export function ciRollup(checks: ScorerCheck[]): string {
  *  produces a new key, so the correction stops applying exactly when
  *  the cluster it corrected no longer exists. */
 export async function reclusterRepo(
-  pool: Pool,
+  db: Db,
   tenantId: string,
   repoId: string,
   clusters: Cluster[],
 ): Promise<void> {
-  const corrections = await pool.query(
+  // B1/B2: the DELETE+INSERT below must be atomic. When called with a
+  // Pool, run them in a transaction of our own; when called with a
+  // PoolClient (e.g. inside a digest build), the caller owns the
+  // transaction and we run the statements on that client. (A
+  // PoolClient is a pg Client, so it HAS a connect() method — the
+  // check must be instanceof Pool, not a duck-type on connect.)
+  if (db instanceof Pool) {
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      await reclusterRepoTx(client, tenantId, repoId, clusters);
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+    return;
+  }
+  await reclusterRepoTx(db as PoolClient, tenantId, repoId, clusters);
+}
+
+/** Inner recluster: runs on a client that is already inside a
+ *  transaction (owned by this module or by the caller). */
+async function reclusterRepoTx(
+  client: PoolClient,
+  tenantId: string,
+  repoId: string,
+  clusters: Cluster[],
+): Promise<void> {
+  const corrections = await client.query(
     `SELECT cluster_key, correction FROM cluster_corrections
      WHERE tenant_id = $1 AND repo_id = $2`,
     [tenantId, repoId],
@@ -461,20 +492,32 @@ export async function reclusterRepo(
     out.push(c);
   }
 
-  await pool.query(`DELETE FROM clusters WHERE tenant_id = $1 AND repo_id = $2`, [
+  // B2: dedupe by cluster key — a stored correction that repeats a
+  // member (e.g. [[7],[7]]) would otherwise emit two rows with the
+  // same key and the INSERT would throw after the DELETE. Keep the
+  // first occurrence; the partition validation in
+  // recordClusterCorrection prevents new duplicates from being stored.
+  const seenKeys = new Set<string>();
+  const deduped = out.filter((c) => {
+    if (seenKeys.has(c.key)) return false;
+    seenKeys.add(c.key);
+    return true;
+  });
+  await client.query(`DELETE FROM clusters WHERE tenant_id = $1 AND repo_id = $2`, [
     tenantId,
     repoId,
   ]);
-  for (const c of out) {
-    const members = await pool.query(
+  for (const c of deduped) {
+    const members = await client.query(
       `SELECT id FROM pull_requests
        WHERE tenant_id = $1 AND repo_id = $2 AND number = ANY($3::int[])`,
       [tenantId, repoId, c.members],
     );
     const ids = (members.rows as { id: string }[]).map((r) => r.id);
-    await pool.query(
+    await client.query(
       `INSERT INTO clusters (tenant_id, repo_id, cluster_key, member_pr_ids, edge_reasons, human_override)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (repo_id, cluster_key) DO NOTHING`,
       [
         tenantId,
         repoId,
@@ -498,10 +541,13 @@ export async function recordClusterCorrection(
   actor: string,
   reason: string,
 ): Promise<void> {
-  // F8: validate a split on write — a split whose groups do not cover
-  // every member of the cluster is normalized by appending the uncovered
-  // members as singleton groups, so the stored correction can never
-  // express "drop this PR".
+  // F8/B2: validate a split on write — a split must be a partition of
+  // the cluster members. Overlapping or repeated groups (an easy
+  // dashboard slip: a PR dragged into two groups) are collapsed
+  // (first occurrence wins), members that are not in this cluster are
+  // dropped, and members covered by no group become singletons — so
+  // the stored correction can never express a duplicate cluster key
+  // or silently drop a PR.
   let stored: Record<string, unknown> = correction;
   const split = correction.split as { groups?: number[][] } | undefined;
   if (split?.groups && Array.isArray(split.groups)) {
@@ -519,16 +565,22 @@ export async function recordClusterCorrection(
       const all = new Set(
         (nums.rows as { number: number }[]).map((r) => r.number),
       );
-      const covered = new Set(split.groups.flat());
-      const missing = [...all].filter((n) => !covered.has(n)).sort((a, b) => a - b);
-      if (missing.length > 0) {
-        stored = {
-          ...correction,
-          split: {
-            groups: [...split.groups, ...missing.map((n) => [n])],
-          },
-        };
+      const seen = new Set<number>();
+      const cleanGroups: number[][] = [];
+      for (const g of split.groups) {
+        const members = [...g].filter((n) => all.has(n) && !seen.has(n));
+        for (const n of members) seen.add(n);
+        if (members.length > 0) {
+          cleanGroups.push(members.sort((a, b) => a - b));
+        }
       }
+      const missing = [...all].filter((n) => !seen.has(n)).sort((a, b) => a - b);
+      stored = {
+        ...correction,
+        split: {
+          groups: [...cleanGroups, ...missing.map((n) => [n])],
+        },
+      };
     }
   }
   await pool.query(
@@ -562,7 +614,7 @@ export async function listClusters(
 }
 
 export async function storeDigest(
-  pool: Pool,
+  db: Db,
   tenantId: string,
   repoId: string,
   date: string,
@@ -572,7 +624,7 @@ export async function storeDigest(
   // Returns whether this call inserted the row (F7): two concurrent
   // builds for the same (tenant, repo, date) race here, and only the
   // winner may report created=true / audit a digest_issued entry.
-  const res = await pool.query(
+  const res = await db.query(
     `INSERT INTO digests (tenant_id, repo_id, digest_date, digest_id, content)
      VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (repo_id, digest_date) DO NOTHING`,

@@ -161,7 +161,15 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       }
       let payload: Record<string, unknown>;
       try {
-        payload = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(rawBody.toString("utf8"));
+        // N1: a valid-JSON non-object body (e.g. literal `null`) is
+        // not a webhook payload — ignore it like any other non-PR
+        // event instead of 500ing on `payload.installation`.
+        if (typeof parsed !== "object" || parsed === null) {
+          await client.query("ROLLBACK");
+          return reply.code(200).send({ ok: true, ignored: true });
+        }
+        payload = parsed as Record<string, unknown>;
       } catch {
         await client.query("ROLLBACK");
         return reply.code(400).send({ error: "invalid JSON" });

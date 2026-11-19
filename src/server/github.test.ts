@@ -34,4 +34,12 @@ test("F11: PR references are not linked issues", () => {
   assert.deepEqual(linkedIssuesFromBody("See pull request #123"), []);
   assert.deepEqual(linkedIssuesFromBody("Version 2.0, see #99"), [99]);
   assert.deepEqual(linkedIssuesFromBody("Fixes #42, see PR #123"), [42]);
+  // B3: plural/list forms are PR references too, not linked issues.
+  assert.deepEqual(linkedIssuesFromBody("See PRs #123 and #124 for context"), []);
+  assert.deepEqual(linkedIssuesFromBody("Blocked by PRs #123 and #124"), []);
+  assert.deepEqual(linkedIssuesFromBody("See pull requests #7 and #8"), []);
+  assert.deepEqual(linkedIssuesFromBody("Depends on PRs #123, #124"), []);
+  assert.deepEqual(linkedIssuesFromBody("See PR #123 and #124"), []);
+  // A PR reference followed by a real issue still yields the issue.
+  assert.deepEqual(linkedIssuesFromBody("See PR #123, fixes #42"), [42]);
 });

@@ -9,7 +9,7 @@
  * identical digest id (D-4), so a rebuild is a no-op.
  */
 
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import {
   clusterPrs,
   DEFAULT_AGENT_BRANCH_PREFIXES,
@@ -48,7 +48,14 @@ export function isoDate(v: string | Date | null | undefined): string {
   return new Date().toISOString();
 }
 
-/** Build (or return the existing) digest for a repo on a date. */
+/** Build (or return the existing) digest for a repo on a date.
+ *  B1: the whole build runs inside one transaction on one client,
+ *  serialized per (tenant, repo, date) with an advisory lock — two
+ *  concurrent builds for the same key used to race through
+ *  reclusterRepo (DELETE-then-INSERT) and return phantom digest ids
+ *  that no GET would ever resolve. With the lock, the loser waits,
+ *  then sees the stored digest at the early check and returns ITS id.
+ *  The lock key is two int32s from SHA-256(tenant|repo|date). */
 export async function buildDigestForRepo(
   pool: Pool,
   tenantId: string,
@@ -56,10 +63,48 @@ export async function buildDigestForRepo(
   fullName: string,
   date: string,
 ): Promise<{ digestId: string; created: boolean }> {
-  const existing = await store.getDigest(pool, tenantId, repoId, date);
+  const hash = createHash("sha256")
+    .update(`headgate:digest:${tenantId}:${repoId}:${date}`)
+    .digest();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock($1::int, $2::int)",
+      [hash.readInt32BE(0), hash.readInt32BE(4)],
+    );
+    const result = await buildDigestLocked(
+      client,
+      tenantId,
+      repoId,
+      fullName,
+      date,
+    );
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // The connection is already gone; nothing left to roll back.
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function buildDigestLocked(
+  client: PoolClient,
+  tenantId: string,
+  repoId: string,
+  fullName: string,
+  date: string,
+): Promise<{ digestId: string; created: boolean }> {
+  const existing = await store.getDigest(client, tenantId, repoId, date);
   if (existing) return { digestId: existing.digest_id, created: false };
 
-  const repo = await pool.query(
+  const repo = await client.query(
     `SELECT sensitive_paths, agent_branch_prefixes FROM repos WHERE id = $1`,
     [repoId],
   );
@@ -70,21 +115,21 @@ export async function buildDigestForRepo(
       ? (repo.rows[0].agent_branch_prefixes as string[])
       : DEFAULT_AGENT_BRANCH_PREFIXES;
 
-  const openPrs = await store.listOpenPrs(pool, tenantId, repoId);
+  const openPrs = await store.listOpenPrs(client, tenantId, repoId);
 
   // Score any open PR that has no score yet (a snapshot that arrived
   // without a scoring run, e.g. after a crash mid-job).
   for (const pr of openPrs) {
-    const existingScore = await store.latestScore(pool, pr.id);
+    const existingScore = await store.latestScore(client, pr.id);
     if (!existingScore) {
-      await store.scoreStoredPr(pool, tenantId, repoId, pr, sensitivePaths);
+      await store.scoreStoredPr(client, tenantId, repoId, pr, sensitivePaths);
     }
   }
 
   // Cluster from stored snapshots.
   const clusterInputs: ClusterPr[] = [];
   for (const pr of openPrs) {
-    const files = await store.getPrFiles(pool, pr.id);
+    const files = await store.getPrFiles(client, pr.id);
     clusterInputs.push({
       number: pr.number,
       files: files.map((f) => f.path),
@@ -94,12 +139,12 @@ export async function buildDigestForRepo(
     });
   }
   const clusters = clusterPrs(clusterInputs, agentPrefixes);
-  await store.reclusterRepo(pool, tenantId, repoId, clusters);
+  await store.reclusterRepo(client, tenantId, repoId, clusters);
 
   // Human decisions that exclude PRs/clusters from the digest (D-6):
   // a reviewed cluster's members and snoozed PRs land in `excluded`
   // with a reason instead of silently vanishing.
-  const decisions = await store.listDecisions(pool, tenantId);
+  const decisions = await store.listDecisions(client, tenantId);
   const excludedPrs = new Map<number, string>();
   const excludedClusters = new Set<string>();
   const escalatedClusters = new Set<string>();
@@ -129,14 +174,14 @@ export async function buildDigestForRepo(
     }
   }
 
-  const storedClusters = await store.listClusters(pool, tenantId, repoId);
+  const storedClusters = await store.listClusters(client, tenantId, repoId);
   const prByNumber = new Map(openPrs.map((p) => [p.number, p]));
   const digestClusters: DigestClusterInput[] = [];
   const excluded: DigestExcluded[] = [];
   const removedMembers: DigestPr[] = [];
 
   for (const sc of storedClusters) {
-    const memberRows = await pool.query(
+    const memberRows = await client.query(
       `SELECT number FROM pull_requests WHERE id = ANY($1::uuid[])`,
       [sc.member_pr_ids],
     );
@@ -157,8 +202,8 @@ export async function buildDigestForRepo(
         excluded.push({ pr_number: n, reason: excludedPrs.get(n) ?? "snoozed" });
         continue;
       }
-      const score = await store.latestScore(pool, pr.id);
-      const checks = await store.getPrChecks(pool, pr.id);
+      const score = await store.latestScore(client, pr.id);
+      const checks = await store.getPrChecks(client, pr.id);
       const member: DigestPr = {
         number: pr.number,
         title: pr.title,
@@ -208,8 +253,8 @@ export async function buildDigestForRepo(
       excluded.push({ pr_number: pr.number, reason: excludedPrs.get(pr.number) ?? "snoozed" });
       continue;
     }
-    const score = await store.latestScore(pool, pr.id);
-    const checks = await store.getPrChecks(pool, pr.id);
+    const score = await store.latestScore(client, pr.id);
+    const checks = await store.getPrChecks(client, pr.id);
     const key = createHash("sha256")
       .update(JSON.stringify([pr.number]))
       .digest("hex")
@@ -246,6 +291,13 @@ export async function buildDigestForRepo(
   // (tenant, repo, date) both pass the early getDigest check, but only
   // the winner of the insert reports created=true, so exactly one
   // digest_issued audit entry is written.
-  const created = await store.storeDigest(pool, tenantId, repoId, date, digestId, content);
+  const created = await store.storeDigest(client, tenantId, repoId, date, digestId, content);
+  if (!created) {
+    // B1: the insert lost — another build stored a digest for this
+    // (tenant, repo, date) first. Return ITS id, never the locally
+    // computed one: no GET will ever resolve a loser id.
+    const stored = await store.getDigest(client, tenantId, repoId, date);
+    if (stored) return { digestId: stored.digest_id, created: false };
+  }
   return { digestId, created };
 }

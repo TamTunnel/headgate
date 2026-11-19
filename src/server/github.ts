@@ -97,11 +97,14 @@ export function diffHash(files: GhFile[]): string {
  *  reference, not an issue, and is excluded (F11). */
 export function linkedIssuesFromBody(body: string): number[] {
   const out = new Set<number>();
-  // Strip PR references first: "See PR #123", "pull request #7".
-  const withoutPrRefs = body.replace(
-    /\b(?:PR|pull requests?)\s*#\d+/gi,
-    "",
-  );
+  // Strip PR references first: "See PR #123", "pull request #7" — and
+  // the plural/list forms (B3): "PRs #123 and #124", "Depends on PRs
+  // #123, #124", "pull requests #7 and #8". A bare #N that follows a
+  // PR reference in the same comma/and list is part of that reference,
+  // not a linked issue, so the whole list span is stripped at once.
+  const withoutPrRefs = body
+    .replace(/\bPRs?\s*#\d+(?:\s*(?:,|and)\s*#\d+)*/gi, "")
+    .replace(/\bpull requests?\s*#\d+(?:\s*(?:,|and)\s*#\d+)*/gi, "");
   const re = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|#)\s*#?(\d+)/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(withoutPrRefs)) !== null) {

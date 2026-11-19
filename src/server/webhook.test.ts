@@ -457,6 +457,31 @@ test("F9: malformed-JSON webhook delivery returns 400 without parser detail", as
   }
 });
 
+test("N1: a literal null webhook body is ignored, not a 500", async () => {
+  const t = await makeTestApp();
+  try {
+    const sig = signPayload(TEST_WEBHOOK_SECRET, Buffer.from("null", "utf8"));
+    const res = await t.app.inject({
+      method: "POST",
+      url: "/webhooks/github",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "d-null-body",
+        "x-github-event": "pull_request",
+        "x-hub-signature-256": sig,
+      },
+      payload: "null",
+    });
+    assert.equal(res.statusCode, 200);
+    // The delivery id is not burned: a valid redelivery still ingests.
+    await seedPr(t, 8);
+    const r2 = await postWebhook(t.app, { deliveryId: "d-null-body", payload: prPayload(INSTALLATION, REPO, 8) });
+    assert.equal(r2.status, 202);
+  } finally {
+    await t.close();
+  }
+});
+
 test("F13: the digest marks PRs with snapshots older than 24h as stale", async () => {
   const t = await makeTestApp();
   try {
